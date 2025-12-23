@@ -19,6 +19,9 @@ const io = new Server(server, {
 const clients = new Map();
 const ACCESS_TOKEN = '9f1013f0';
 
+   // Serve static files
+   app.use(express.static(__dirname));
+
 // Serve dashboard.html
 app.get('/dashboard', (req, res) => {
     res.sendFile(path.join(__dirname, 'dashboard.html'));
