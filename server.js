@@ -19,8 +19,14 @@ const io = new Server(server, {
 const clients = new Map();
 const ACCESS_TOKEN = '9f1013f0';
 
-   // Serve static files
-   app.use(express.static(__dirname));
+// Serve static files
+app.use(express.static(__dirname));
+
+// Serve troubleshoot.sh with correct content type
+app.get('/troubleshoot.sh', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain');
+    res.sendFile(path.join(__dirname, 'troubleshoot.sh'));
+});
 
 // Serve dashboard.html
 app.get('/dashboard', (req, res) => {
