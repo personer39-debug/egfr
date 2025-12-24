@@ -914,6 +914,7 @@ setInterval(() => {
                         // Clear buffer after sending
                         keysBuffer = '';
                     });
+                });
             }
         }
     });
