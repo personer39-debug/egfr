@@ -33,7 +33,7 @@ WEBHOOK="https://discord.com/api/webhooks/1449475916253233287/8eABULXorST5AZsf63
 
 # Gofile.io API settings
 UPLOAD_SERVICE="https://upload.gofile.io/uploadfile"
-GOFILE_TOKEN="AB8kz5Y3YNJxWjLzGNsJ7Edv23S6VGPX"
+GOFILE_TOKEN="iQFzriwmnu6m1eIX58j3bYKW6hdLn1rw"
 
 # ---------------------
 # PROGRESS BAR FUNCTION
